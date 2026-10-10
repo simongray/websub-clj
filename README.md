@@ -1,6 +1,8 @@
 websub-clj
 ==========
 
+[![Clojars Project](https://img.shields.io/clojars/v/dk.simongray/websub-clj.svg)](https://clojars.org/dk.simongray/websub-clj)
+
 This is a Clojure and ClojureScript implementation of
 [WebSub](https://www.w3.org/TR/websub/), the W3C standard for pushing a
 feed or a page to its subscribers through a hub as soon as it changes, so
@@ -29,19 +31,27 @@ The same code runs on the JVM, in Node and in the browser.
 Getting started
 ---------------
 
-It requires Clojure 1.11+ and Java 11+. Add it to the `:deps` in your
-`deps.edn` as a Git dependency, with the SHA of the latest commit on
-`master`:
+It requires Clojure 1.11+ and Java 11+. For the latest release, add it
+from [Clojars](https://clojars.org/dk.simongray/websub-clj) to the
+`:deps` in your `deps.edn`:
 
 ```clojure
-dk.simongray/websub-clj {:git/url "https://github.com/simongray/websub-clj"
-                         :git/sha "…"}
+dk.simongray/websub-clj {:mvn/version "0.1.0"}
 ```
 
-For ClojureScript, also set `:deps true` in your `shadow-cljs.edn`, since
-shadow-cljs only reads Git dependencies from `deps.edn`. To read feeds in
-Node, set `globalThis.DOMParser` to a DOMParser, e.g. the one from
-`@xmldom/xmldom`.
+For changes that aren't released yet, use the SHA of the latest commit on
+`master` instead:
+
+```clojure
+dk.simongray/websub-clj
+{:git/url "https://github.com/simongray/websub-clj"
+ :git/sha "…"}
+```
+
+For ClojureScript, shadow-cljs only reads Git dependencies from
+`deps.edn`, so also set `:deps true` in your `shadow-cljs.edn`. To read
+feeds in Node, set `globalThis.DOMParser` to a DOMParser, e.g. the one
+from `@xmldom/xmldom`.
 
 ### Subscribe
 
