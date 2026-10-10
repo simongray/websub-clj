@@ -102,7 +102,7 @@
                                 "hub.lease_seconds must be a positive integer"]
                                [{"hub.mode" "subscribe" "hub.callback" callback "hub.topic" topic
                                  "hub.secret" (apply str (repeat 200 "a"))}
-                                "hub.secret must be a text of fewer than 200 bytes"]
+                                "hub.secret is not one that this hub takes"]
                                [{"hub.mode" "publish"} "hub.url must name the topic that changed"]
                                [{"hub.mode" "renew"} "hub.mode must be subscribe, unsubscribe or publish"]]]
         (is (= [400 reason] ((juxt :status :body) (serve (form fields)))) reason))
@@ -112,6 +112,24 @@
                                       :accept-pred (fn [job _] (str/starts-with? (:topic job) "https://example.org/"))))]
         (is (= 403 (:status (picky (form {"hub.mode" "publish" "hub.url" "https://elsewhere.example/"})))))
         (is (= 202 (:status (picky (form {"hub.mode" "publish" "hub.url" topic})))))))
+    (testing "a hub with rules of its own"
+      (reset! jobs [])
+      (let [own (hub/handler (assoc (options (atom {}) identity jobs)
+                                    :secret-pred  string?
+                                    :url-fn       identity
+                                    :topic-fields ["hub.topic"]))
+            small (hub/handler (assoc (options (atom {}) identity jobs) :max-form-bytes 100))]
+        (is (= 202 (:status (own (form {"hub.mode"     "subscribe"
+                                        "hub.topic"    "https://example.org/%7Eme"
+                                        "hub.callback" callback
+                                        "hub.secret"   (apply str (repeat 50 "a"))})))))
+        (is (= ["https://example.org/%7Eme" 50] ((juxt :topic (comp count secret/reveal :secret)) (first @jobs)))
+            "a longer secret by :secret-pred, and URLs as they are by :url-fn")
+        (is (= [400 "hub.topic must name the topic that changed"]
+               ((juxt :status :body) (own (form {"hub.mode" "publish" "hub.url" topic}))))
+            "the topics of a publisher in the :topic-fields")
+        (is (= 413 (:status (small (form {"hub.mode" "publish" "hub.url" (apply str topic (repeat 100 "x"))}))))
+            "and a form no larger than :max-form-bytes")))
     (is (= 202 (:status (serve {:request-method :post :form-params {"hub.mode" "publish" "hub.url" topic}})))
         "a form that Ring's middleware has read")
     (is (= [405 "POST"] ((juxt :status #(get-in % [:headers "Allow"])) (serve {:request-method :get}))))
@@ -162,6 +180,20 @@
                                 (assoc opts :send (fn [_] (throw (ex-info "Down" {:type ::down})))))
                   (fn [report]
                     (is (= [false ::down] [(:verified? report) (get-in report [:error :type])]) "nor a subscriber that's down")))
+     #(async/then (hub/run-job! (assoc job :lease-seconds 7200)
+                                (assoc opts
+                                       :challenge-fn       (constantly "abc")
+                                       :verified-pred      (fn [challenge {:keys [body]}]
+                                                             (= challenge (str/trim body)))
+                                       :callback-redirects 2
+                                       :send               (fn [r]
+                                                             (swap! sent conj r)
+                                                             {:status 200 :url (:url r) :body "abc\n"})))
+                  (fn [report]
+                    (is (= ["abc" 2] [(get (query (peek @sent)) "hub.challenge") (:max-redirects (peek @sent))])
+                        "a challenge of :challenge-fn, and redirects by :callback-redirects")
+                    (is (:verified? report) "and a check that passes by :verified-pred")
+                    (is (= 7200 (:lease-seconds (saved))))))
      #(async/then (hub/run-job! {:job :verify :mode :unsubscribe :topic topic :callback callback} opts)
                   (fn [report]
                     (is (:verified? report))
@@ -265,6 +297,32 @@
                     (is (= [:expired] (map :outcome (:deliveries report))))
                     (is (= {} @subscriptions) "no delivery after the lease, which ends the subscription"))))))
 
+(deftest deliveries-by-rules-of-the-hub
+  (let [subscriptions (atom (subscribed))
+        sent          (atom [])
+        content       {:body (bytes/encode rss) :content-type "application/rss+xml" :published t0}
+        opts          (assoc (options subscriptions (subscriber sent (constantly 410)) (atom []))
+                             :delete-gone? false)]
+    (run
+     #(async/then (hub/run-job! {:job :distribute :topic topic :content content} opts)
+                  (fn [report]
+                    (is (= #{:gone} (set (map :outcome (:deliveries report)))))
+                    (is (= 2 (count (get @subscriptions topic)))
+                        "a subscription that is gone stays by :delete-gone?")))
+     #(do (swap! subscriptions assoc-in [topic "https://a.example/cb" :published] t0)
+          (async/then (hub/run-job! {:job :deliver :topic topic :callback "https://a.example/cb" :content content
+                                     :attempt 1}
+                                    (assoc opts :skip-stale? false :send (subscriber sent)))
+                      (fn [report]
+                        (is (= :delivered (:outcome report))
+                            "a retry of what the subscriber has had, by :skip-stale?"))))
+     #(async/then (hub/run-job! {:job :distribute :topic topic :content content}
+                                (assoc opts :delete-expired? false :now-fn (constantly #inst "2026-10-10T14:00:00Z")))
+                  (fn [report]
+                    (is (= #{:expired} (set (map :outcome (:deliveries report)))))
+                    (is (= 2 (count (get @subscriptions topic)))
+                        "and one whose lease ended, by :delete-expired?"))))))
+
 (defn- content-type
   "The Content-Type of the `request`."
   [request]
@@ -340,14 +398,15 @@
                         (is (= ["{}" "{}"] (map (comp bytes/decode :body) @sent)) "and all of a topic that is no feed")))))))
 
 (deftest leases-and-retries
-  (let [opts hub/default-options]
-    (is (= 864000 (hub/lease-seconds nil opts)) "ten days by default")
-    (is (= 3600 (hub/lease-seconds 60 opts)))
-    (is (= 86400 (hub/lease-seconds 86400 opts)))
-    (is (= 864000 (hub/lease-seconds 99999999 opts)) "never longer than the hub's limit"))
+  (is (= 864000 (hub/lease-seconds nil)) "ten days by default")
+  (is (= 3600 (hub/lease-seconds 60)))
+  (is (= 86400 (hub/lease-seconds 86400)))
+  (is (= 864000 (hub/lease-seconds 99999999)) "never longer than the hub's limit")
+  (is (= 60 (hub/lease-seconds 60 (assoc hub/default-options :min-lease-seconds 10))) "or the limits of a hub")
   (is (= [#inst "2026-10-10T12:01:00Z" #inst "2026-10-10T12:05:00Z" #inst "2026-10-10T12:30:00Z"
           #inst "2026-10-10T14:00:00Z" #inst "2026-10-11T00:00:00Z" nil]
-         (map #(hub/next-attempt % t0 (:retries hub/default-options)) (range 6))))
+         (map #(hub/next-attempt % t0) (range 6))))
+  (is (= [#inst "2026-10-10T12:00:10Z" nil] (map #(hub/next-attempt % t0 [10]) (range 2))))
   (is (hub/active? {:expires #inst "2026-10-10T12:00:01Z"} t0))
   (is (not (hub/active? {:expires t0} t0)))
   (let [a     (atom {})
@@ -356,3 +415,15 @@
     (is (= [{:x 1}] ((:subscriptions store) topic)))
     (is (nil? ((:update! store) topic callback (constantly nil))))
     (is (= {} @a) "a topic without subscriptions is gone from the map")))
+
+(deftest request-maps-by-the-spec
+  (let [job {:job :verify :mode :unsubscribe :topic topic :callback callback}]
+    (is (= {"id" "7" "hub.mode" "unsubscribe" "hub.topic" topic "hub.challenge" "abc"}
+           (query (hub/verification job "abc")))
+        "a check without a lease")
+    (is (= {"id" "7" "hub.mode" "denied" "hub.topic" topic} (query (hub/denial job)))
+        "a denial without a reason"))
+  (let [subscription {:topic topic :callback callback :secret "s3cr3t"}
+        r            (hub/distribution subscription {:body (bytes/encode rss)} hub-url)]
+    (is (str/starts-with? (get-in r [:headers "X-Hub-Signature"]) "sha256=")
+        "a delivery signed by sha256")))

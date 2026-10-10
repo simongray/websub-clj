@@ -22,8 +22,31 @@
             [dk.simongray.websub.document :as document]
             [dk.simongray.websub.ring :as ring]))
 
+;; WebSub 5.1.1: decode the characters that need no percent-encoding, which
+;; RFC 3986, section 2.3, names
+(defn ^:no-doc normalized
+  "The `url` with each unreserved character that is percent-encoded
+  decoded."
+  [url]
+  (str/replace url
+               #"%([0-9A-Fa-f]{2})"
+               (fn [[escape hex]]
+                 (let [code #?(:clj  (Long/parseLong hex 16)
+                               :cljs (js/parseInt hex 16))
+                       c    (str (char code))]
+                   (if (re-matches #"[A-Za-z0-9._~-]" c) c escape)))))
+
+;; WebSub 5.3.1
+(defn verified?
+  "Whether the subscriber's `response` confirms the check with the
+  `challenge`: a success whose body is the challenge."
+  [challenge {:keys [status body] :as response}]
+  (boolean (and status
+                (<= 200 status 299)
+                (= challenge body))))
+
 (def default-options
-  "The default of each option of a hub that has one:
+  "The default of each option of a hub that has one, which follows WebSub:
 
   - :lease-seconds, the lease of a subscription that asks for none, ten
     days, as WebSub 8.2 suggests
@@ -36,23 +59,52 @@
     feed that it hasn't had, false
   - :accept-pred, a function of a job and the request that gave it, which
     says whether the hub takes it, always true
+  - :secret-pred, a predicate of the secret of a subscription, which takes
+    a text of fewer than 200 bytes, as WebSub 5.1 says
+  - :url-fn, a function of the callback and topic URLs of a subscription,
+    and the topic URLs of a publisher, normalized
+  - :topic-fields, the fields that name the topics of a publisher, in the
+    order that they count: hub.url and hub.topic
+  - :challenge-fn, a function that gives the challenge of each check,
+    websub/token
+  - :verified-pred, a function of the challenge and the subscriber's
+    response, which says whether the check passed, verified?
+  - :callback-redirects, how many redirects the requests to a callback
+    follow, none, as WebSub 5.3.1 and 8.3 say
+  - :delete-gone?, whether a 410 from a subscriber deletes its
+    subscription, which WebSub 7 allows, true
+  - :delete-expired?, whether a subscription is deleted once its lease
+    ends, true
+  - :skip-stale?, whether a retry is left out once the subscriber has had
+    newer content, true
+  - :max-form-bytes, the limit of a request to the hub, 64 kB
   - :max-bytes, the limit of a topic's content, 32 MB
   - :allow-pred, url/public?, so that no request goes to the hub's own
     network
   - :send, http/send!
   - :now-fn, a function that gives the instant now"
-  {:lease-seconds     864000
-   :min-lease-seconds 3600
-   :max-lease-seconds 864000
-   :retries           [60 300 1800 7200 43200]
-   :signature-method  "sha256"
-   :diff?             false
-   :accept-pred       (constantly true)
-   :max-bytes         (* 32 1024 1024)
-   :allow-pred        url/public?
-   :send              http/send!
-   :now-fn            #?(:clj  #(java.util.Date.)
-                         :cljs #(js/Date.))})
+  {:lease-seconds      864000
+   :min-lease-seconds  3600
+   :max-lease-seconds  864000
+   :retries            [60 300 1800 7200 43200]
+   :signature-method   "sha256"
+   :diff?              false
+   :accept-pred        (constantly true)
+   :secret-pred        websub/secret?
+   :url-fn             normalized
+   :topic-fields       ["hub.url" "hub.topic"]
+   :challenge-fn       websub/token
+   :verified-pred      verified?
+   :callback-redirects 0
+   :delete-gone?       true
+   :delete-expired?    true
+   :skip-stale?        true
+   :max-form-bytes     65536
+   :max-bytes          (* 32 1024 1024)
+   :allow-pred         url/public?
+   :send               http/send!
+   :now-fn             #?(:clj  #(java.util.Date.)
+                          :cljs #(js/Date.))})
 
 (defn ^:no-doc options
   "The `opts` of a hub over default-options. They must name the hub's
@@ -64,6 +116,36 @@
                  (fn? schedule!))
     (throw (ex-info "A hub needs its :url, a :store and :schedule!" {})))
   (merge default-options opts))
+
+(defn active?
+  "Whether the `subscription` is active at the instant `at`, before its
+  lease ends."
+  [subscription at]
+  ;; WebSub 5.3.1: a hub enforces the end of a lease
+  (< (inst-ms at) (inst-ms (:expires subscription))))
+
+;; WebSub 5.3.1 and 8.2
+(defn lease-seconds
+  "The lease of a subscription whose request asked for `asked` seconds, or
+  for none when nil, by the lease options of `opts`, those of
+  default-options by default. It's never endless."
+  ([asked]
+   (lease-seconds asked default-options))
+  ([asked {:keys [lease-seconds min-lease-seconds max-lease-seconds]
+           :as   opts}]
+   (-> (or asked lease-seconds)
+       (max min-lease-seconds)
+       (min max-lease-seconds))))
+
+(defn next-attempt
+  "When to try again, after the failure of the attempt numbered `attempt`,
+  from 0, at the instant `at`, by the seconds to wait in `retries`, those
+  of default-options by default. Nil when the retries are used up."
+  ([attempt at]
+   (next-attempt attempt at (:retries default-options)))
+  ([attempt at retries]
+   ;; WebSub 7: a hub retries within limits of its own
+   (some->> (get retries attempt) (websub/later at))))
 
 (defn- without
   "The map `m` of subscriptions by topic and callback without the one of
@@ -114,43 +196,11 @@
                 (or value
                     {:error (http/failure error)}))))
 
-(defn active?
-  "Whether the `subscription` is active at the instant `at`, before its
-  lease ends."
-  [subscription at]
-  ;; WebSub 5.3.1: a hub enforces the end of a lease
-  (< (inst-ms at) (inst-ms (:expires subscription))))
-
-;; WebSub 5.3.1 and 8.2
-(defn lease-seconds
-  "The lease of a subscription whose request asked for `asked` seconds, or
-  for none when nil, by the lease options of `opts`. It's never endless."
-  [asked {:keys [lease-seconds min-lease-seconds max-lease-seconds] :as opts}]
-  (-> (or asked lease-seconds)
-      (max min-lease-seconds)
-      (min max-lease-seconds)))
-
-(defn next-attempt
-  "When to try again, after the failure of the attempt numbered `attempt`,
-  from 0, at the instant `at`, by the seconds to wait in `retries`. Nil
-  when the retries are used up."
-  [attempt at retries]
-  ;; WebSub 7: a hub retries within limits of its own
-  (some->> (get retries attempt) (websub/later at)))
-
-;; WebSub 5.1.1: decode the characters that need no percent-encoding, which
-;; RFC 3986, section 2.3, names
-(defn ^:no-doc normalized
-  "The `url` with each unreserved character that is percent-encoded
-  decoded."
-  [url]
-  (str/replace url
-               #"%([0-9A-Fa-f]{2})"
-               (fn [[escape hex]]
-                 (let [code #?(:clj  (Long/parseLong hex 16)
-                               :cljs (js/parseInt hex 16))
-                       c    (str (char code))]
-                   (if (re-matches #"[A-Za-z0-9._~-]" c) c escape)))))
+(defn- send-to-callback!
+  "Send the `request` to a callback by `opts`, which follows as many
+  redirects as their :callback-redirects."
+  [request {:keys [callback-redirects] :as opts}]
+  (exchange! (assoc request :max-redirects callback-redirects) opts))
 
 (defn- values
   "The values of the field `k` in the form `fields`."
@@ -166,10 +216,10 @@
 ;; WebSub 5.1 and 5.1.1
 (defn- subscription-jobs
   "The job of the subscription request with the form `fields` and `mode`,
-  as a map of the :jobs, or the :problem."
-  [fields mode]
-  (let [callback  (some-> (field fields "hub.callback") normalized)
-        topic     (some-> (field fields "hub.topic") normalized)
+  as a map of the :jobs, or the :problem, by `opts`."
+  [fields mode {:keys [url-fn secret-pred] :as opts}]
+  (let [callback  (some-> (field fields "hub.callback") url-fn)
+        topic     (some-> (field fields "hub.topic") url-fn)
         lease     (field fields "hub.lease_seconds")
         seconds   (some-> lease parse-long)
         secret    (field fields "hub.secret")
@@ -194,8 +244,8 @@
       (and subscribe lease (not (pos-int? seconds)))
       {:problem "hub.lease_seconds must be a positive integer"}
 
-      (and secret (not (websub/secret? secret)))
-      {:problem "hub.secret must be a text of fewer than 200 bytes"}
+      (and secret (not (secret-pred secret)))
+      {:problem "hub.secret is not one that this hub takes"}
 
       :else
       {:jobs [job]})))
@@ -203,28 +253,27 @@
 ;; WebSub 6: the form that most hubs take, with hub.url or hub.topic
 (defn- distribution-jobs
   "The jobs of distributing the topics that the publisher's form `fields`
-  names, as a map of the :jobs, or the :problem."
-  [fields]
-  (let [topics (map normalized (or (seq (values fields "hub.url"))
-                                   (values fields "hub.topic")))]
+  names, as a map of the :jobs, or the :problem, by `opts`."
+  [fields {:keys [url-fn topic-fields] :as opts}]
+  (let [topics (map url-fn (some #(seq (values fields %)) topic-fields))]
     (cond
       (empty? topics)
-      {:problem "hub.url must name the topic that changed"}
+      {:problem (str (first topic-fields) " must name the topic that changed")}
 
       (not (every? url/web-url? topics))
-      {:problem "hub.url must be an http or https URL"}
+      {:problem (str (first topic-fields) " must be an http or https URL")}
 
       :else
       {:jobs (mapv #(hash-map :job :distribute :topic %) (distinct topics))})))
 
 (defn- form-jobs
   "The jobs of the request to the hub with the form `fields`, as a map of
-  the :jobs, or the :problem."
-  [fields]
+  the :jobs, or the :problem, by `opts`."
+  [fields opts]
   (let [mode (field fields "hub.mode")]
     (case mode
-      ("subscribe" "unsubscribe") (subscription-jobs fields mode)
-      "publish"                   (distribution-jobs fields)
+      ("subscribe" "unsubscribe") (subscription-jobs fields mode opts)
+      "publish"                   (distribution-jobs fields opts)
       {:problem "hub.mode must be subscribe, unsubscribe or publish"})))
 
 ;; WebSub 5.1.2: the reason for an error, in plain text
@@ -236,9 +285,9 @@
 (defn- answer
   "The hub's answer to the POST `request`, by `opts`, once it has given the
   jobs of the request to :schedule!."
-  [{:keys [schedule! accept-pred] :as opts} request]
-  (let [fields                 (ring/form-fields request 65536)
-        {:keys [jobs problem]} (some-> fields form-jobs)]
+  [{:keys [schedule! accept-pred max-form-bytes] :as opts} request]
+  (let [fields                 (ring/form-fields request max-form-bytes)
+        {:keys [jobs problem]} (some-> fields (form-jobs opts))]
     (cond
       (nil? fields)
       (text 413 "The request is too large")
@@ -265,9 +314,9 @@
   answers 400 with the reason in plain text to a request that's wrong, and
   403 to one that the :accept-pred refuses.
 
-  A publisher names the topic as hub.url, as most hubs take it, or as
-  hub.topic. The `opts` are those of run-job!, and :moved-to, the URL of
-  another hub that takes the requests from now on."
+  A publisher names the topic in the :topic-fields, hub.url as most hubs
+  take it, or hub.topic. The `opts` are those of run-job!, and :moved-to,
+  the URL of another hub that takes the requests from now on."
   [opts]
   (let [{:keys [moved-to] :as opts} (options opts)]
     (ring/handler
@@ -289,35 +338,30 @@
   "The request map that asks the subscriber of the `job` whether it wants
   it, with the `challenge` to give back and, for a subscription, its lease
   of `lease-seconds`."
-  [{:keys [mode topic callback] :as job} challenge lease-seconds]
-  (let [params [["hub.mode" (name mode)]
-                ["hub.topic" topic]
-                ["hub.challenge" challenge]
-                ["hub.lease_seconds" lease-seconds]]]
-    {:method        :get
-     :url           (url/with-query callback params)
-     ;; WebSub 5.3.1 and 8.3: the exact callback, and a redirect fails
-     :max-redirects 0}))
-
-;; WebSub 5.3.1
-(defn verified?
-  "Whether the subscriber's `response` confirms the check with the
-  `challenge`: a success whose body is the challenge."
-  [challenge {:keys [status body] :as response}]
-  (boolean (and status
-                (<= 200 status 299)
-                (= challenge body))))
+  ([job challenge]
+   (verification job challenge nil))
+  ([{:keys [mode topic callback] :as job} challenge lease-seconds]
+   (let [params [["hub.mode" (name mode)]
+                 ["hub.topic" topic]
+                 ["hub.challenge" challenge]
+                 ["hub.lease_seconds" lease-seconds]]]
+     {:method        :get
+      :url           (url/with-query callback params)
+      ;; WebSub 5.3.1 and 8.3: the exact callback, and a redirect fails
+      :max-redirects 0})))
 
 ;; WebSub 5.2
 (defn denial
   "The request map that tells the subscriber of the `job` that the hub
-  denies its subscription, for the `reason`, which can be nil."
-  [{:keys [topic callback] :as job} reason]
-  {:method        :get
-   :url           (url/with-query callback [["hub.mode" "denied"]
-                                            ["hub.topic" topic]
-                                            ["hub.reason" reason]])
-   :max-redirects 0})
+  denies its subscription, for the `reason`, which can be left out."
+  ([job]
+   (denial job nil))
+  ([{:keys [topic callback] :as job} reason]
+   {:method        :get
+    :url           (url/with-query callback [["hub.mode" "denied"]
+                                             ["hub.topic" topic]
+                                             ["hub.reason" reason]])
+    :max-redirects 0}))
 
 (defn- reported
   "The `report` with the :status of the subscriber's `response`, or its
@@ -329,7 +373,7 @@
   "Tell the subscriber of the `job` that the hub denies its subscription,
   for the `reason`, by `opts`, and give the job's report."
   [job reason opts]
-  (async/then (exchange! (denial job reason) opts)
+  (async/then (send-to-callback! (denial job reason) opts)
               #(reported (assoc job :denied reason) %)))
 
 (defn- subscribed
@@ -348,17 +392,18 @@
 (defn- check!
   "Check with the subscriber that it asked for the `job`, by `opts`, and
   save or delete the subscription when it did."
-  [{:keys [mode topic callback] :as job} {:keys [store now-fn] :as opts}]
+  [{:keys [mode topic callback] :as job}
+   {:keys [store now-fn challenge-fn verified-pred] :as opts}]
   (let [at        (now-fn)
-        challenge (websub/token)
+        challenge (challenge-fn)
         lease     (when (= :subscribe mode)
                     (lease-seconds (:lease-seconds job) opts))
         change    (if lease
                     (subscribed job lease at)
                     (constantly nil))]
-    (async/then (exchange! (verification job challenge lease) opts)
+    (async/then (send-to-callback! (verification job challenge lease) opts)
                 (fn [response]
-                  (let [ok?    (verified? challenge response)
+                  (let [ok?    (boolean (verified-pred challenge response))
                         report (cond-> (reported job response)
                                  true  (assoc :verified? ok?)
                                  lease (assoc :lease-seconds lease))]
@@ -404,19 +449,23 @@
 (defn distribution
   "The request map that delivers the `content` of a topic, a map of its
   :body and :content-type, to the `subscription` from the hub at
-  `hub-url`, signed by `method` when the subscription has a secret."
-  [{:keys [topic callback secret] :as subscription}
-   {:keys [body content-type] :as content}
-   hub-url
-   method]
-  {:method        :post
-   :url           callback
-   :headers       (cond-> {"Link" (websub/link-header [hub-url] topic)}
-                    content-type (assoc "Content-Type" content-type)
-                    secret       (assoc "X-Hub-Signature"
-                                        (websub/signature method secret body)))
-   :body          body
-   :max-redirects 0})
+  `hub-url`, signed by `method`, sha256 by default, when the subscription
+  has a secret."
+  ([subscription content hub-url]
+   (distribution subscription content hub-url
+                 (:signature-method default-options)))
+  ([{:keys [topic callback secret] :as subscription}
+    {:keys [body content-type] :as content}
+    hub-url
+    method]
+   {:method        :post
+    :url           callback
+    :headers       (cond-> {"Link" (websub/link-header [hub-url] topic)}
+                     content-type (assoc "Content-Type" content-type)
+                     secret       (assoc "X-Hub-Signature"
+                                         (websub/signature method secret body)))
+    :body          body
+    :max-redirects 0}))
 
 (defn- stale?
   "Whether the `subscription` has had the `content`, or a newer one."
@@ -467,7 +516,7 @@
   "The `report` of the delivery of the `sent` payload of `content`, by the
   subscriber's `response`, once the store of `opts` has what it means."
   [{:keys [topic callback] :as report} content sent response
-   {:keys [store] :as opts}]
+   {:keys [store delete-gone?] :as opts}]
   (let [update! (:update! store)
         status  (:status response)
         report  (reported report response)]
@@ -478,7 +527,8 @@
 
       ;; WebSub 7: a 410 says that the subscription was deleted
       (= 410 status)
-      (async/then (update! topic callback (constantly nil))
+      (async/then (when delete-gone?
+                    (update! topic callback (constantly nil)))
                   (constantly (assoc report :outcome :gone)))
 
       ;; WebSub 7: anything else fails, and the subscription stays
@@ -489,24 +539,26 @@
   "Deliver the `content` to the `subscription` by `opts`, as the attempt
   numbered `attempt`, and give the report."
   [{:keys [topic callback] :as subscription} content attempt
-   {:keys [store url signature-method now-fn] :as opts}]
+   {:keys [store url signature-method now-fn delete-expired? skip-stale?]
+    :as   opts}]
   (let [at     (now-fn)
         report {:topic topic :callback callback :attempt attempt}]
     (cond
       ;; WebSub 5.3.1: no delivery after the lease
       (not (active? subscription at))
-      (async/then ((:update! store) topic callback
-                                    #(when (and % (active? % at)) %))
+      (async/then (when delete-expired?
+                    ((:update! store) topic callback
+                                      #(when (and % (active? % at)) %)))
                   (constantly (assoc report :outcome :expired)))
 
       ;; a retry after a newer delivery would undo it
-      (stale? subscription content)
+      (and skip-stale? (stale? subscription content))
       (assoc report :outcome :stale)
 
       :else
       (let [sent    (payload subscription content opts)
             request (distribution subscription sent url signature-method)]
-        (async/then (exchange! request opts)
+        (async/then (send-to-callback! request opts)
                     #(outcome report content sent % opts))))))
 
 (defn deliver!

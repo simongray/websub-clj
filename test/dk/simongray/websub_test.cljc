@@ -60,16 +60,22 @@
                                                        "<link rel=\"hub\" href=\"" hub "\">"
                                                        "<link rel=\"self\" href=\"" topic "\">"
                                                        "</head><body></body></html>")))))
-    (is (= {:hubs ["https://example.org/x/hub?a=1&b=2"] :topic topic}
-           (websub/discover (response "text/html" "<head><base href=\"/x/\"><link rel=hub href=\"hub?a=1&amp;b=2\">")))
+    (is (= {:hubs ["https://example.org/x/hub?a=1&b=2"] :topic "https://example.org/x/feed"}
+           (websub/discover (response "text/html" (str "<head><base href=\"/x/\"><link rel=hub href=\"hub?a=1&amp;b=2\">"
+                                                       "<link rel=self href=feed>"))))
         "against the base of the page, with its character references decoded")
     (is (= {:hubs [hub] :topic topic}
-           (websub/discover (response "text/html" (str "<title>A blog</title><link rel=hub href=" hub "><p>A post"))))
+           (websub/discover (response "text/html" (str "<title>A blog</title><link rel=hub href=" hub
+                                                       "><link rel=self href=" topic "><p>A post"))))
         "in a page without a head tag")
-    (is (nil? (websub/discover (response "text/html" (str "<html><head></head><body><link rel=hub href=" hub "></body>"))))
-        "not in the body, as WebSub 8.1 advises")
-    (is (nil? (websub/discover (response "text/html" (str "<head><!-- <link rel=hub href=" hub "> -->"
-                                                          "<script>'<link rel=hub href=" hub ">'</script>"))))
+    (let [in-body (response "text/html" (str "<html><head><link rel=self href=" topic "></head>"
+                                             "<body><link rel=hub href=" hub "></body>"))]
+      (is (nil? (websub/discover in-body)) "not in the body, as WebSub 8.1 advises")
+      (is (= {:hubs [hub] :topic topic} (websub/discover in-body {:body-links? true})) "unless :body-links?"))
+    (is (nil? (websub/discover (response "text/html" (str "<head><link rel=self href=" topic ">"
+                                                          "<!-- <link rel=hub href=" hub "> -->"
+                                                          "<script>'<link rel=hub href=" hub ">'</script>"))
+                               {:body-links? true}))
         "not in a comment or a script"))
   (testing "102: in an Atom feed"
     (is (= {:hubs [hub] :topic topic} (websub/discover (response "application/atom+xml" atom-feed)))
@@ -92,16 +98,20 @@
            (:topic (websub/discover (response "text/plain" "" (links hub "/feed.xml?self=other")))))))
   (testing "links that the caller has read from the document"
     (is (= {:hubs [hub] :topic topic}
-           (websub/discover (response "application/atom+xml" "not read") [{:rel "hub" :href hub}])))
-    (is (nil? (websub/discover (response "application/atom+xml" atom-feed) []))
+           (websub/discover (response "application/atom+xml" "not read")
+                            {:links [{:rel "hub" :href hub} {:rel "self" :href topic}]})))
+    (is (nil? (websub/discover (response "application/atom+xml" atom-feed) {:links []}))
         "and the body is never read then"))
   (testing "several relation types in one link, in any case"
     (is (= {:hubs [hub] :topic topic}
            (websub/discover (response "text/plain" "" (str "<" hub ">; rel=\"alternate HUB\", <" topic ">; rel=\"self canonical\""))))))
   (testing "a document without a media type"
     (is (= {:hubs [hub] :topic topic} (websub/discover {:url topic :headers {} :body atom-feed}))))
-  (is (= {:hubs [hub] :topic topic} (websub/discover (response "text/plain" "" (str "<" hub ">; rel=\"hub\""))))
-      "the URL of the response, when nothing names the topic")
+  (testing "a hub without a topic"
+    (let [hub-alone (response "text/plain" "" (str "<" hub ">; rel=\"hub\""))]
+      (is (nil? (websub/discover hub-alone)) "names nothing to subscribe to, as WebSub 5.1 has it")
+      (is (= {:hubs [hub] :topic topic} (websub/discover hub-alone {:url-as-topic? true}))
+          "unless the URL of the response counts")))
   (is (nil? (websub/discover (response "application/rss+xml" "<rss><channel><oops></rss>"))) "a feed that doesn't parse")
   (is (nil? (websub/discover (response "application/atom+xml" "<feed xmlns=\"http://www.w3.org/2005/Atom\"/>"))) "no hub")
   (is (nil? (websub/discover {}))))
@@ -120,6 +130,10 @@
   (is (= "https://hub.example.org/"
          (:url (websub/request :subscribe "http://hub.example.org/" topic callback {:secret shared-secret})))
       "a secret goes over https alone")
+  (is (= "http://hub.example.org/"
+         (:url (websub/request :subscribe "http://hub.example.org/" topic callback
+                               {:secret shared-secret :secret-over-http? true})))
+      "unless :secret-over-http?")
   (is (= {"hub.callback" callback "hub.mode" "unsubscribe" "hub.topic" topic "key" "k"}
          (url/query-params (:body (websub/request :unsubscribe hub topic callback {:params [["key" "k"]]}))))
       "the fields without a value are left out, and more can be given")
@@ -146,7 +160,8 @@
   (is (= (str "<" hub ">; rel=\"hub\", <https://other.example.org/>; rel=\"hub\", <" topic ">; rel=\"self\"")
          (websub/link-header [hub "https://other.example.org/"] topic))
       "the Link header that names the hubs")
-  (is (= {:hubs [hub] :topic topic} (websub/discover {:url "https://example.org/" :headers {}} (websub/links [hub] topic)))
+  (is (= {:hubs [hub] :topic topic}
+         (websub/discover {:url "https://example.org/" :headers {}} {:links (websub/links [hub] topic)}))
       "and the links for a document, which a subscriber reads back"))
 
 (defn- answering
@@ -161,7 +176,8 @@
   (let [sent    (atom [])
         request (websub/request :subscribe hub topic callback)
         tls?    #(str/starts-with? (:url %) "https:")
-        attempt #(async/attempt (fn [] (websub/call! %1 {:send (answering sent %2)})))]
+        attempt (fn [request f & [opts]]
+                  (async/attempt #(websub/call! request (merge {:send (answering sent f)} opts))))]
     (run
      #(async/then (websub/call! request {:send (answering sent (constantly {:status 202})) :timeout-seconds 5})
                   (fn [answer]
@@ -188,7 +204,8 @@
      #(do (reset! sent [])
           (async/then (attempt (assoc request :url "http://hub.example.org/") (constantly {:status 202}))
                       (fn [{:keys [value]}]
-                        (is (= ["https://hub.example.org/"] (map :url @sent)) "an http hub over https first")
+                        (is (= [["https://hub.example.org/" 5]] (map (juxt :url :timeout-seconds) @sent))
+                            "an http hub over https first, for five seconds at most")
                         (is (= "https://hub.example.org/" (:url value))))))
      #(do (reset! sent [])
           (async/then (attempt (assoc request :url "http://hub.example.org/")
@@ -210,10 +227,35 @@
                         (is (some? error))
                         (is (= ["https://hub.example.org/"] (map :url @sent)) "but never with a secret"))))
      #(do (reset! sent [])
-          (async/then (attempt (assoc request :url "http://hub.example.org:8080/") (constantly {:status 202}))
+          (async/then (attempt (assoc request :url "http://hub.example.org:8080/" :timeout-seconds 2)
+                               (constantly {:status 202}))
                       (fn [_]
-                        (is (= ["http://hub.example.org:8080/"] (map :url @sent))
-                            "and a hub with a port of its own as it is")))))))
+                        (is (= [["https://hub.example.org:8080/" 2]] (map (juxt :url :timeout-seconds) @sent))
+                            "a hub with a port of its own too, and a shorter limit of the request's own"))))
+     #(do (reset! sent [])
+          (async/then (attempt (assoc request :url "http://hub.example.org/") (constantly {:status 202})
+                               {:prefer-https? false})
+                      (fn [_]
+                        (is (= ["http://hub.example.org/"] (map :url @sent)) "as it is, unless :prefer-https?"))))
+     #(do (reset! sent [])
+          (async/then (attempt (assoc request :url "http://hub.example.org/") (constantly {:status 202})
+                               {:https-timeout-seconds 1})
+                      (fn [_]
+                        (is (= [1] (map :timeout-seconds @sent)) "for :https-timeout-seconds"))))
+     #(do (reset! sent [])
+          (async/then (attempt (assoc request :url "http://hub.example.org/" :body (secret/hide "hub.secret=x"))
+                               (fn [r]
+                                 (if (tls? r)
+                                   (throw (ex-info "No TLS" {}))
+                                   {:status 202}))
+                               {:secret-over-http? true})
+                      (fn [{:keys [value]}]
+                        (is (= ["https://hub.example.org/" "http://hub.example.org/"] (map :url @sent))
+                            "and a secret over http too by :secret-over-http?")
+                        (is (= 202 (:status value))))))
+     #(async/then (attempt request (fn [_] {:status 307 :headers {"location" ["/moved"]}}) {:max-redirects 0})
+                  (fn [{:keys [error]}]
+                    (is (= 307 (:status (ex-data error))) "and no hub that redirects by :max-redirects 0"))))))
 
 (deftest publishing
   (let [sent (atom [])
@@ -331,6 +373,14 @@
       (is (= 200 (:status (post! {} feed "/open"))))
       (is (= [[:feed {:body 65 :content-type nil :topic nil :hubs []}]] @came)
           "each delivery, and no topic without a Link header")
+      (let [strict (websub/handler {:wanted-pred            (constantly true)
+                                    :deliver!               identity
+                                    :secret                 shared-secret
+                                    :unsigned-status        401
+                                    :wrong-signature-status 403})]
+        (is (= [401 403] (map #(:status (strict {:request-method :post :headers % :body feed}))
+                              [{} {"x-hub-signature" "sha256=00"}]))
+            "answers of the subscriber's own to a delivery that isn't signed, or is signed wrong"))
       (let [small (websub/handler {:wanted-pred (constantly true) :deliver! identity :max-bytes 64 :max-challenge 5})]
         (is (= 413 (:status (small {:request-method :post :headers {} :body feed}))))
         (is (= 404 (:status (small {:request-method :get :query-string (query {"hub.mode" "subscribe"})}))))))
@@ -346,7 +396,9 @@
   (let [at #inst "2026-10-10T12:00:00Z"]
     (is (= #inst "2026-10-19T12:00:00Z" (websub/next-renewal 864000 at)) "a tenth of a lease of ten days")
     (is (= #inst "2026-11-08T12:00:00Z" (websub/next-renewal (* 30 86400) at)) "a day before a long one")
-    (is (= #inst "2026-10-10T12:54:00Z" (websub/next-renewal 3600 at))))
+    (is (= #inst "2026-10-10T12:54:00Z" (websub/next-renewal 3600 at)))
+    (is (= #inst "2026-10-20T11:00:00Z" (websub/next-renewal 864000 at 3600)) "or an hour before"))
   (let [tokens (repeatedly 10 websub/token)]
     (is (every? #(re-matches #"[A-Za-z0-9_-]{43}" %) tokens) "in the letters of a challenge too")
-    (is (= 10 (count (set tokens))))))
+    (is (= 10 (count (set tokens)))))
+  (is (re-matches #"[A-Za-z0-9_-]{22}" (websub/token 16)) "of 16 bytes"))

@@ -1,16 +1,27 @@
 (ns dk.simongray.websub.end-to-end-test
   "A subscriber, a publisher and a hub of this library that talk over HTTP
   on localhost, with the redirects of websub.rocks's tests 201 to 204."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.websub :as websub]
             [dk.simongray.websub.bytes :as bytes]
             [dk.simongray.websub.hub :as hub]
             [dk.simongray.websub.test-support :refer [with-server]]))
 
+(defn- send-without-tls!
+  "Send the `request` as http/send! does, or refuse an https URL at once,
+  as a host without TLS does. The test server would rather wait for an
+  answer that never comes."
+  [request]
+  (if (str/starts-with? (:url request) "https:")
+    (throw (ex-info "No TLS on localhost" {:url (:url request)}))
+    (http/send! request)))
+
 (def anywhere
   "The options of requests to localhost."
-  {:allow-pred (constantly true)})
+  {:allow-pred (constantly true)
+   :send       send-without-tls!})
 
 (defn- moved
   "A Ring handler that redirects with `status` to the path `path` on the
@@ -72,7 +83,7 @@
             (doseq [path ["/moved-feed" "/old-feed"]]
               (is (= {:status 200 :hubs [(str url "/hub")] :topic topic}
                       (websub/discover! (str url path) anywhere)))))
-          (testing "a subscription"
+          (testing "a subscription, over http when https fails"
             (is (= {:status 202 :url (str url "/hub")} (subscribe (str url "/hub") "/callback")))
             (is (= [true] (map :verified? (run-jobs! jobs @hub-opts)))))
           (testing "203 and 204: a hub that redirects"

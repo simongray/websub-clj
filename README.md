@@ -2,17 +2,17 @@ websub-clj
 ==========
 
 This is a Clojure and ClojureScript implementation of
-[WebSub](https://www.w3.org/TR/websub/), the W3C standard by which a hub
-pushes a feed or a page to its subscribers as soon as it changes, so that
-they don't have to poll it. It covers all three roles of the standard:
-the subscriber, the publisher and the hub.
+[WebSub](https://www.w3.org/TR/websub/), the W3C standard for pushing a
+feed or a page to its subscribers through a hub as soon as it changes, so
+that they don't have to poll it. It covers all three roles of the
+standard: the subscriber, the publisher and the hub.
 
 - **The whole standard.** The code follows the Recommendation of 2 June
-  2026, and cites the section of each rule it implements. The scenarios
-  of the [websub.rocks](https://websub.rocks) test suite are among its
-  tests.
+  2026 and cites the section of each rule it implements. Its tests
+  include the scenarios of the [websub.rocks](https://websub.rocks) test
+  suite, run locally.
 - **Plain data.** Requests are maps that any HTTP client can send, and
-  the callback of a subscriber and the hub are Ring handlers.
+  both a subscriber's callback and the hub are Ring handlers.
 - **Nothing in the background.** The hub gives its work to you as jobs,
   plain maps, and you run them when and where you like.
 - **Safe by default.** A secret only goes over https, signatures are
@@ -22,9 +22,9 @@ the subscriber, the publisher and the hub.
 The same code runs on the JVM, in Node and in the browser.
 
 > This library was spun out of [podcast-clj](https://github.com/simongray/podcast-clj),
-> a library for making podcast software, where it lets a server have the
-> feeds it follows pushed to it. Like podcast-clj, it was developed with
-> assistance from frontier LLMs.
+> a library for making podcast software, where servers use it to get new
+> episodes pushed to them instead of polling every feed. Like podcast-clj,
+> it was developed with assistance from frontier LLMs.
 
 Getting started
 ---------------
@@ -40,7 +40,7 @@ dk.simongray/websub-clj {:git/url "https://github.com/simongray/websub-clj"
 
 For ClojureScript, also set `:deps true` in your `shadow-cljs.edn`, since
 shadow-cljs only reads Git dependencies from `deps.edn`. To read feeds in
-Node, install a DOMParser as `globalThis.DOMParser`, e.g. that of
+Node, set `globalThis.DOMParser` to a DOMParser, e.g. the one from
 `@xmldom/xmldom`.
 
 ### Subscribe
@@ -56,9 +56,9 @@ Find the hubs of a topic with `discover!`:
 ;;     :topic  "https://simon.grays.blog/feed"}
 ```
 
-If you fetch the topic yourself, `discover` reads the same from the
-response. Then ask a hub for the topic, giving it a callback URL that
-nobody can guess and a secret to sign what it sends:
+If you fetch the topic yourself, give the response to `discover` for the
+same map. Then subscribe to the topic at a hub, giving it a callback URL
+that nobody can guess and a secret to sign what it sends:
 
 ```clojure
 (def secret
@@ -88,20 +88,20 @@ topic:
                    :secret      secret}))
 ```
 
-The `:wanted-pred` says whether you asked for the subscription of the
-`:topic`, and `:deliver!` gets the bytes of each delivery that has the
-signature of the secret. Return from it quickly, and read the feed
-afterwards.
+The `:wanted-pred` says whether you asked for a subscription to the
+`:topic`, and `:deliver!` gets the bytes of each delivery signed with the
+secret. Return from it quickly, and read the feed afterwards.
 
 The check also gives `:wanted-pred` the `:lease-seconds` of the
-subscription. Before the lease ends, at `websub/next-renewal`, discover
-the topic again, since it may have moved, and subscribe again with a new
-callback URL.
+subscription. Before the lease ends, at the time that
+`websub/next-renewal` gives, subscribe again with a new callback URL.
+Discover the topic first, since it may have moved.
 
 ### Publish
 
-Name the hub in a Link header of the topic, or in its document with the
-maps of `websub/links`, and tell the hub each time the topic changes:
+Name the hub in a Link header of the topic, or in the feed or page itself
+with the links of `websub/links`, and tell the hub each time the topic
+changes:
 
 ```clojure
 (websub/link-header ["https://pubsubhubbub.superfeedr.com/"]
@@ -115,9 +115,9 @@ maps of `websub/links`, and tell the hub each time the topic changes:
 
 ### Run a hub
 
-A hub is a Ring handler, a store of subscriptions and a function of
-yours that runs jobs, e.g. on a thread pool or from a queue in a
-database:
+A hub consists of its Ring handler, a store of subscriptions and a
+function of yours that runs its jobs, e.g. on a thread pool or from a
+queue in a database:
 
 ```clojure
 (require '[dk.simongray.websub.hub :as hub])
@@ -141,21 +141,25 @@ database:
   (hub/handler opts))
 ```
 
-The handler answers subscribers and publishers at once, and gives the
+The handler answers subscribers and publishers right away, and gives the
 work that follows to `schedule!`: a check of a subscription, or the
-delivery of a topic that changed. A delivery that fails comes back as a
-retry with an `:at`. A store is a map of two functions, so one over a
-database is a few lines, and `hub/default-options` lists the rest of the
-options, e.g. the leases and the retries.
+delivery of a topic that changed. A delivery that fails goes to
+`schedule!` again as a retry, with the `:at` to run it. A store is a map
+of two functions, so one for a database takes a few lines. The options
+that have defaults, e.g. the leases and the retries, are in
+`hub/default-options`, and the docstrings of `hub/handler` and
+`hub/run-job!` describe the others.
 
 Principles
 ----------
 
 - **Standards first.** The code follows the Recommendation and cites its
-  sections, and says so where it makes a choice of its own.
+  sections, and a comment marks each choice of its own. Most rules are
+  options too, and `websub/default-options` and `hub/default-options`
+  list their defaults, which follow the spec.
 - **Plain data.** Requests, jobs and reports are maps, and every
   function that sends takes a `:send` of your own.
-- **One codebase.** The library is written in `.cljc`, and depends on
+- **One codebase.** The library is written in `.cljc` and depends on
   [wary-fetch](https://github.com/simongray/wary-fetch) for requests,
   [qname-hiccup](https://github.com/simongray/qname-hiccup) for feeds and
   [html-pieces](https://github.com/simongray/html-pieces) for pages.

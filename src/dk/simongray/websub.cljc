@@ -17,13 +17,6 @@
             [dk.simongray.websub.document :as document]
             [dk.simongray.websub.ring :as ring]))
 
-(def default-limits
-  "The limits of a callback handler that its options don't set: the
-  :max-bytes of a delivery, 32 MB, and the :max-challenge, the length of
-  the longest challenge that it gives back."
-  {:max-bytes     (* 32 1024 1024)
-   :max-challenge 512})
-
 ;; WebSub 7.1.1
 (def signature-methods
   "The hash algorithms of a signature that a subscriber takes, by their
@@ -32,6 +25,41 @@
   Most hubs sign with sha1, which is weak. A subscriber whose callback is
   an http URL should leave it out, as WebSub 8.3 says."
   #{"sha1" "sha256" "sha384" "sha512"})
+
+(def default-options
+  "The default of each option of a subscriber or a publisher that has one,
+  which follows WebSub:
+
+  - :url-as-topic?, false: without a rel=self, a document names no topic,
+    since WebSub 5.1 subscribes to that URL alone. True makes the URL of
+    the response the topic.
+  - :body-links?, false: an HTML page names its links in its head, as
+    WebSub 8.1 advises
+  - :prefer-https?, true: an http hub is tried over https first, as WebSub
+    8.2 says, for :https-timeout-seconds at most, 5
+  - :secret-over-http?, false: a secret goes over https alone, as WebSub
+    5.1 says
+  - :max-redirects, 5: how often a hub can send a request on to another
+  - :signature-methods, signature-methods
+  - :unsigned-status, 403: the answer to a delivery without the signature
+    that its secret asks for, as WebSub 3.2.6 has it
+  - :wrong-signature-status, 200: the answer to a delivery with a wrong
+    signature, which WebSub 7.1.2 allows, and which tells a stranger
+    nothing
+  - :max-bytes, 32 MB: the largest delivery that a callback takes
+  - :max-challenge, 512: the longest challenge that a callback gives
+    back"
+  {:url-as-topic?          false
+   :body-links?            false
+   :prefer-https?          true
+   :https-timeout-seconds  5
+   :secret-over-http?      false
+   :max-redirects          5
+   :signature-methods      signature-methods
+   :unsigned-status        403
+   :wrong-signature-status 200
+   :max-bytes              (* 32 1024 1024)
+   :max-challenge          512})
 
 (def ^:no-doc algorithms
   "The HMAC algorithm of each signature method."
@@ -50,11 +78,13 @@
 ;; WebSub 5.1 and 8.2: callbacks that nobody can guess, and secrets of
 ;; cryptographic randomness
 (defn token
-  "A random text that nobody can guess, e.g. for a callback URL or a
-  secret: 32 bytes from a secure source, in the URL-safe letters of
-  base64."
-  []
-  (bytes/base64url (bytes/random 32)))
+  "A random text of `n` bytes, 32 by default, that nobody can guess, e.g.
+  for a callback URL or a secret. The bytes come from a secure source, and
+  the text is in the URL-safe letters of base64."
+  ([]
+   (token 32))
+  ([n]
+   (bytes/base64url (bytes/random n))))
 
 ;; RFC 8288, section 3.3
 (defn- relation?
@@ -74,46 +104,53 @@
 
 (defn- discovery
   "The hubs and the topic that the `response` names in its Link headers,
-  and else in the `document-links`, a delay."
-  [{:keys [url headers] :as response} document-links]
+  and else in the `document-links`, a delay, by `opts`."
+  [{:keys [url headers] :as response} document-links
+   {:keys [url-as-topic?] :as opts}]
   (let [header-links (headers/links headers)
         find         (fn [rel]
                        (or (seq (hrefs rel url header-links))
                            (seq (hrefs rel url @document-links))))
         hubs         (find "hub")
-        self         (first (find "self"))]
-    (when hubs
+        ;; WebSub 5.1: the topic is the rel=self URL
+        topic        (or (first (find "self"))
+                         (when url-as-topic? url))]
+    (when (and hubs topic)
       {:hubs  (vec (distinct hubs))
-       ;; a choice: without a rel=self, the URL that was fetched
-       :topic (or self url)})))
+       :topic topic})))
 
 ;; WebSub 4 and 8.1
 (defn discover
   "The hubs and the topic that the `response` names, as a map of :hubs and
-  :topic, or nil when it names no hub. The links of its document are
-  read from its body, unless they're given as `links`.
+  :topic, by `opts`, or nil when it names no hub or no topic.
 
   The response is a map of :url, :headers and :body, as http/send! gives
   it. For the hubs and for the topic alike, the Link headers count first,
   and the document only when they name none. A document's links are those
   in the head of an HTML page, or the atom:links of an Atom or RSS feed
-  itself, not of its entries. Each link is a map of :rel and :href.
+  itself, not of its entries. A relative URL counts from the URL of the
+  response.
 
-  The topic is the rel=self URL, or the URL of the response when nothing
-  names one. A relative URL counts from the URL of the response."
+  The `opts` are the :url-as-topic? and :body-links? of default-options,
+  and :links, the links of the document as maps of :rel and :href, e.g.
+  of a feed that you've parsed already, so that the body isn't read."
   ([response]
-   (discovery response (delay (document/links response))))
-  ([response links]
-   (discovery response (delay links))))
+   (discover response {}))
+  ([response opts]
+   (let [opts  (merge default-options opts)
+         links (delay (if (contains? opts :links)
+                        (:links opts)
+                        (document/links response opts)))]
+     (discovery response links opts))))
 
 (defn discover!
   "Fetch the topic at `url` with `opts`, and give its hubs and topic as
   discover does, with the :status of the response. A request that fails
   gives the :error as http/failure has it.
 
-  The `opts` are those of http/fetch!, e.g. :accept for the representation
-  whose rel=self is the topic, as WebSub 4.1 has it, and :send. In
-  ClojureScript, it gives a promise."
+  The `opts` are those of discover, and those of http/fetch!, e.g. :accept
+  for the representation whose rel=self is the topic, as WebSub 4.1 has
+  it, and :send. In ClojureScript, it gives a promise."
   ([url]
    (discover! url {}))
   ([url opts]
@@ -123,7 +160,7 @@
                    {:error (http/failure error)}
                    (merge {:status (:status value)}
                           (when (<= 200 (:status value) 299)
-                            (discover value))))))))
+                            (discover value opts))))))))
 
 (defn ^:no-doc form-request
   "The request map that posts the form of `fields`, pairs of a name and a
@@ -181,12 +218,14 @@
     the body of the request is then hidden too.
   - :params, more fields as pairs of a name and a value, for a hub that
     asks for them
+  - :secret-over-http?, as default-options has it
 
   A request with a secret goes to the hub over https, even when the hub is
-  an http URL."
+  an http URL, unless :secret-over-http?."
   ([mode hub topic callback]
    (request mode hub topic callback {}))
-  ([mode hub topic callback {:keys [lease-seconds params] :as opts}]
+  ([mode hub topic callback
+    {:keys [lease-seconds params secret-over-http?] :as opts}]
    {:pre [(map? opts)]}
    (let [secret (secret/reveal (:secret opts))]
      (when-let [problem (request-problem mode hub topic callback
@@ -197,7 +236,8 @@
                                 :callback      callback
                                 :lease-seconds lease-seconds})))
      ;; WebSub 5.1 and 8.2: a secret goes over https alone
-     (cond-> (form-request (cond-> hub secret https-url)
+     (cond-> (form-request (cond-> hub
+                             (and secret (not secret-over-http?)) https-url)
                            (concat [["hub.callback" callback]
                                     ["hub.mode" (name mode)]
                                     ["hub.topic" topic]
@@ -270,9 +310,9 @@
 ;; WebSub 5.1.2: a hub can send a request on to another hub
 (defn- send-on!
   "Send the `request` with `send`, and on to the hub that a 307 or 308
-  names, `n` times at most, five by default."
+  names, as many times as its :max-redirects says."
   ([send request]
-   (send-on! send request 5))
+   (send-on! send request (:max-redirects request)))
   ([send request n]
    (async/then (send request)
                (fn [{:keys [status headers] :as response}]
@@ -283,16 +323,12 @@
                      (send-on! send (assoc request :url location) (dec n))
                      response))))))
 
-(defn- port?
-  "Whether the `url` names its port."
-  [url]
-  (boolean (re-find #"^[^:]+://[^/?#]*:\d+(?:[/?#]|$)" url)))
-
 (defn- send-to-hub!
-  "Send the `request` with `send` to its hub, over https when it's an http
-  URL and the body is a hidden text. An http URL without a port goes over
-  https first, and over http when that fails."
-  [send request]
+  "Send the `request` with `send` to its hub, by the `opts` of call!. An
+  http hub gets it over https first, and over http when that fails, unless
+  the body is a hidden text, which goes over https alone."
+  [send request {:keys [prefer-https? https-timeout-seconds secret-over-http?]
+                 :as   opts}]
   (let [url   (:url request)
         https (update request :url https-url)]
     (cond
@@ -300,15 +336,19 @@
       (send-on! send request)
 
       ;; WebSub 5.1: a secret goes over https alone
-      (secret/hidden? (:body request))
+      (and (secret/hidden? (:body request))
+           (not secret-over-http?))
       (send-on! send https)
 
       ;; WebSub 8.2: subscribers favour https for hubs
-      (not (port? url))
-      (async/then (async/attempt #(send-on! send https))
-                  (fn [{:keys [value]}]
-                    (or value
-                        (send-on! send request))))
+      prefer-https?
+      (let [timeout (min https-timeout-seconds
+                         (:timeout-seconds request https-timeout-seconds))]
+        (async/then (async/attempt
+                     #(send-on! send (assoc https :timeout-seconds timeout)))
+                    (fn [{:keys [value]}]
+                      (or value
+                          (send-on! send request)))))
 
       :else
       (send-on! send request))))
@@ -320,20 +360,23 @@
 
   A hub answers 202 to a subscription request that it takes, and then
   calls the callback to check it. A status that isn't a success throws
-  ::failed with the :status and the :message of the hub. An http hub
-  without a port is tried over https first, a request with a secret goes
-  over https alone, and a 307 or 308 sends the request on to the hub it
-  names.
+  ::failed with the :status and the :message of the hub. An http hub is
+  tried over https first, a request with a secret goes over https alone,
+  and a 307 or 308 sends the request on to the hub it names.
 
   The `opts` are the limits, :allow-pred and :user-agent of http/send!,
-  and :send, a function that sends a request map in place of
-  http/send!."
+  :send, a function that sends a request map in place of http/send!, and
+  the :prefer-https?, :https-timeout-seconds, :secret-over-http? and
+  :max-redirects of default-options."
   ([request]
    (call! request {}))
-  ([request {:keys [send] :or {send http/send!} :as opts}]
+  ([request opts]
    {:pre [(map? opts)]}
-   (async/then (send-to-hub! send (http/with-options request opts))
-               answer)))
+   (let [all     (merge {:send http/send!} default-options opts)
+         request (merge (select-keys all [:max-redirects])
+                        (http/with-options request opts))]
+     (async/then (send-to-hub! (:send all) request all)
+                 answer))))
 
 (defn publish!
   "Tell each of the `hubs` that the `topic` changed, with `opts`, and give
@@ -432,7 +475,8 @@
 (defn- distribution
   "The answer to the hub's POST `request` with the content of a topic, by
   the `env` of the handler."
-  [{:keys [secret deliver! subscribed-pred signature-methods max-bytes]
+  [{:keys [secret deliver! subscribed-pred signature-methods max-bytes
+           unsigned-status wrong-signature-status]
     :as   env}
    {:keys [headers] :as request}]
   (let [secret    (if (fn? secret) (secret request) secret)
@@ -450,12 +494,11 @@
       ;; WebSub 3.2.6: a delivery without the signature that the secret
       ;; asks for is refused
       (and secret (nil? signature))
-      (ring/response 403 octets "")
+      (ring/response unsigned-status octets "")
 
-      ;; WebSub 7.1.2: a wrong signature is ignored, and may still get a
-      ;; success, which tells nothing about the secret
+      ;; WebSub 7.1.2: a wrong signature is ignored
       (and secret (not (signed? secret signature @body signature-methods)))
-      (ring/response 200 octets "")
+      (ring/response wrong-signature-status octets "")
 
       :else
       (do (deliver! {:body         @body
@@ -477,9 +520,8 @@
   - :secret, a text or a function of the request that gives one
   - :subscribed-pred, a function of the request that says whether its
     subscription still exists, always true by default
-  - :signature-methods, signature-methods by default
-  - :max-bytes and :max-challenge, with default-limits for those that the
-    options leave out
+  - the :signature-methods, :unsigned-status, :wrong-signature-status,
+    :max-bytes and :max-challenge of default-options
 
   A hub calls the callback in three ways:
 
@@ -490,8 +532,8 @@
   - It delivers the topic, and :deliver! gets it as the bytes :body, if it
     has the signature that the :secret asks for. The handler answers 200
     when the delivery came, so :deliver! should return fast. It answers
-    403 to a delivery without a signature, 410 to one whose subscription
-    is gone, and 413 to one larger than :max-bytes.
+    410 to a delivery whose subscription is gone, and 413 to one larger
+    than :max-bytes.
   - It tells that it denied a subscription, or ended one, and :denied!
     gets the :topic and the :reason.
 
@@ -503,9 +545,8 @@
   (when-not (and (fn? wanted-pred) (fn? deliver!))
     (throw (ex-info "A handler needs the functions :wanted-pred and :deliver!"
                     {})))
-  (let [env (merge default-limits
-                   {:signature-methods signature-methods
-                    :subscribed-pred   (constantly true)}
+  (let [env (merge default-options
+                   {:subscribed-pred (constantly true)}
                    opts)]
     (ring/handler
      (fn [{:keys [request-method query-string] :as request}]
@@ -522,10 +563,12 @@
 ;; WebSub 5.3.1: the subscriber asks again before the lease ends
 (defn next-renewal
   "When to ask the hub again for a subscription whose lease of
-  `lease-seconds` began at the instant `at`: a tenth of the lease before
-  it ends, and a day before at most."
-  [lease-seconds at]
-  (later at (- lease-seconds (min (quot lease-seconds 10) 86400))))
+  `lease-seconds` began at the instant `at`: `seconds-before` it ends, or
+  by default a tenth of the lease before, and a day before at most."
+  ([lease-seconds at]
+   (next-renewal lease-seconds at (min (quot lease-seconds 10) 86400)))
+  ([lease-seconds at seconds-before]
+   (later at (- lease-seconds seconds-before))))
 
 (comment
   ;; the hubs of a feed, from its headers first

@@ -49,17 +49,27 @@
        (remove #(and (string? %) (str/blank? %)))
        (take-while #(head-tags (tag %)))))
 
-;; HTML Standard, sections 4.2.3 and 4.2.4; WebSub 8.1: the head alone
+(defn- elements
+  "The elements of the page with the `nodes`, at any depth."
+  [nodes]
+  (filter vector? (mapcat #(tree-seq vector? (partial drop 2) %) nodes)))
+
+;; HTML Standard, sections 4.2.3 and 4.2.4; WebSub 8.1: the head alone,
+;; unless `body?`
 (defn- page-links
-  "The links in the head of the HTML page `s` at `url`, made absolute
-  against its base."
-  [s url]
-  (let [head  (head (html/parse s))
-        attrs (fn [t]
-                (keep #(when (= t (tag %)) (second %)) head))
-        base  (or (some->> (attrs :base) (keep :href) first (absolute url))
+  "The links in the head of the HTML page `s` at `url`, or in all of it
+  when `body?`, made absolute against its base."
+  [s url body?]
+  (let [nodes (html/parse s)
+        head  (head nodes)
+        attrs (fn [t xs]
+                (keep #(when (= t (tag %)) (second %)) xs))
+        base  (or (some->> (attrs :base head)
+                           (keep :href)
+                           first
+                           (absolute url))
                   url)]
-    (for [{:keys [rel href]} (attrs :link)
+    (for [{:keys [rel href]} (attrs :link (if body? (elements nodes) head))
           :when              href]
       {:rel rel :href (absolute base href)})))
 
@@ -119,15 +129,15 @@
 
 (defn links
   "The links that the document in the `response` names for itself, as maps
-  of :rel and :href: those in the head of an HTML page, or the atom:links
-  of an Atom or RSS feed. Nil for another document, or one that doesn't
-  parse."
-  [{:keys [url headers body] :as response}]
+  of :rel and :href, by `opts`: those in the head of an HTML page, or in
+  all of it by :body-links?, or the atom:links of an Atom or RSS feed. Nil
+  for another document, or one that doesn't parse."
+  [{:keys [url headers body] :as response} {:keys [body-links?] :as opts}]
   (let [type (headers/media-type (headers/header headers "content-type"))
         s    (text body (headers/charset headers))]
     (try
       (case (kind type s)
-        :html (page-links s url)
+        :html (page-links s url body-links?)
         :xml  (feed-links s url)
         nil)
       (catch #?(:clj Exception :cljs :default) _
