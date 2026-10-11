@@ -64,6 +64,10 @@
            (websub/discover (response "text/html" (str "<head><base href=\"/x/\"><link rel=hub href=\"hub?a=1&amp;b=2\">"
                                                        "<link rel=self href=feed>"))))
         "against the base of the page, with its character references decoded")
+    (is (= {:hubs ["https://example.org/hub"] :topic "https://example.org/feed"}
+           (websub/discover (response "text/html" (str "<head><link rel=hub href=hub><link rel=self href=feed></head>"
+                                                       "<body><p>A comment <base href=\"https://elsewhere.example/\">"))))
+        "a base in the body, e.g. in a comment, moves no link of the head")
     (is (= {:hubs [hub] :topic topic}
            (websub/discover (response "text/html" (str "<title>A blog</title><link rel=hub href=" hub
                                                        "><link rel=self href=" topic "><p>A post"))))
