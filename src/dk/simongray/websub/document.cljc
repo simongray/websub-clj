@@ -4,21 +4,14 @@
   subscriber that has had them."
   (:require [clojure.string :as str]
             [dk.simongray.html-pieces :as html]
+            [dk.simongray.html-pieces.url :as url]
             [dk.simongray.qname-hiccup :as xml]
             [dk.simongray.wary-fetch.bytes :as bytes]
-            [dk.simongray.wary-fetch.headers :as headers]
-            [dk.simongray.wary-fetch.url :as url]))
+            [dk.simongray.wary-fetch.headers :as headers]))
 
 (def atom-uri
   "The namespace of Atom."
   "http://www.w3.org/2005/Atom")
-
-(def head-tags
-  "The elements that a browser puts in the head of a page until the body
-  begins, even in a page without a head tag."
-  ;; HTML Standard, section 13.2.6.4.4, the "in head" insertion mode
-  #{:base :basefont :bgsound :link :meta :noframes :noscript :script :style
-    :template :title})
 
 (defn- tag
   "The tag of `node`, or nil for text."
@@ -26,52 +19,24 @@
   (when (vector? node)
     (first node)))
 
+;; URL Standard, as a browser resolves the links of a page
 (defn absolute
-  "The `href` made absolute against `base`, or as it is without a base."
+  "The `href` made absolute against `base`, or as it is without a base. Nil
+  when it doesn't resolve against the base."
   [base href]
   (if base
-    (url/absolute-url base href)
+    (url/resolve base href)
     href))
 
-(defn- unwrapped
-  "The `nodes` with the children of each element of `t` in its place."
-  [t nodes]
-  (mapcat #(if (= t (tag %)) (drop 2 %) [%]) nodes))
-
-(defn- head
-  "The elements in the head of the page with the `nodes`, where a browser
-  puts them: those of its head element and those before its first
-  content."
-  [nodes]
-  (->> nodes
-       (unwrapped :html)
-       (unwrapped :head)
-       (remove #(and (string? %) (str/blank? %)))
-       (take-while #(head-tags (tag %)))))
-
-(defn- elements
-  "The elements of the page with the `nodes`, at any depth."
-  [nodes]
-  (filter vector? (mapcat #(tree-seq vector? (partial drop 2) %) nodes)))
-
-;; HTML Standard, sections 4.2.3 and 4.2.4; WebSub 8.1: the head alone,
-;; unless `body?`
+;; WebSub 8.1: the head alone, unless `body?`
 (defn- page-links
   "The links in the head of the HTML page `s` at `url`, or in all of it
   when `body?`, made absolute against its base."
   [s url body?]
-  (let [nodes (html/parse s)
-        head  (head nodes)
-        attrs (fn [t xs]
-                (keep #(when (= t (tag %)) (second %)) xs))
-        base  (or (some->> (attrs :base head)
-                           (keep :href)
-                           first
-                           (absolute url))
-                  url)]
-    (for [{:keys [rel href]} (attrs :link (if body? (elements nodes) head))
-          :when              href]
-      {:rel rel :href (absolute base href)})))
+  (for [[_ {:keys [rel href]}] (html/links s {:base-url  url
+                                             :link-tags #{:link}
+                                             :body?     (boolean body?)})]
+    {:rel rel :href href}))
 
 (defn- rebased
   "The `base` of the `element`'s content, by its xml:base."
