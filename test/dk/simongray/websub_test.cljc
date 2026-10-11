@@ -7,10 +7,10 @@
             [clojure.test :refer [deftest is testing]]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
+            [dk.simongray.wary-fetch.bytes :as bytes]
             [dk.simongray.wary-fetch.secret :as secret]
             [dk.simongray.wary-fetch.url :as url]
             [dk.simongray.websub :as websub]
-            [dk.simongray.websub.bytes :as bytes]
             [dk.simongray.websub.test-support :refer [run]]))
 
 (def hub "https://hub.example.org/")

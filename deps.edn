@@ -1,11 +1,12 @@
 {:paths ["src"]
 
  ;; Clojure 1.11 is the floor, and the tests run on it unless an alias says
- ;; otherwise. wary-fetch sends the requests, qname-hiccup reads the links
- ;; and the entries of a feed, and html-pieces reads the links of a page.
+ ;; otherwise. wary-fetch sends the requests and has the HMACs of their
+ ;; signatures, qname-hiccup reads the links and the entries of a feed, and
+ ;; html-pieces reads the links of a page.
  :deps  {org.clojure/clojure       {:mvn/version "1.11.4"}
-         dk.simongray/wary-fetch   {:mvn/version "0.2.0"}
-         dk.simongray/qname-hiccup {:mvn/version "0.1.0"}
+         dk.simongray/wary-fetch   {:mvn/version "0.3.0"}
+         dk.simongray/qname-hiccup {:mvn/version "0.2.0"}
          dk.simongray/html-pieces  {:mvn/version "0.2.0"}}
 
  :aliases

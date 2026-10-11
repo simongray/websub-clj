@@ -4,8 +4,8 @@
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [dk.simongray.wary-fetch :as http]
+            [dk.simongray.wary-fetch.bytes :as bytes]
             [dk.simongray.websub :as websub]
-            [dk.simongray.websub.bytes :as bytes]
             [dk.simongray.websub.hub :as hub]
             [dk.simongray.websub.test-support :refer [with-server]]))
 

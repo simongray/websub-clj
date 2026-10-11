@@ -5,9 +5,9 @@
   (:require [clojure.string :as str]
             [dk.simongray.html-pieces :as html]
             [dk.simongray.qname-hiccup :as xml]
+            [dk.simongray.wary-fetch.bytes :as bytes]
             [dk.simongray.wary-fetch.headers :as headers]
-            [dk.simongray.wary-fetch.url :as url]
-            [dk.simongray.websub.bytes :as bytes]))
+            [dk.simongray.wary-fetch.url :as url]))
 
 (def atom-uri
   "The namespace of Atom."
