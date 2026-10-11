@@ -297,6 +297,26 @@
                     (is (= [:expired] (map :outcome (:deliveries report))))
                     (is (= {} @subscriptions) "no delivery after the lease, which ends the subscription"))))))
 
+#?(:clj
+   (deftest deliveries-at-once
+     (let [in-flight (atom 0)
+           most      (atom 0)
+           sent      (atom [])
+           answer    (subscriber sent)
+           slow      (fn [request]
+                       (swap! most max (swap! in-flight inc))
+                       (Thread/sleep 100)
+                       (swap! in-flight dec)
+                       (answer request))
+           content   {:body (bytes/encode rss) :content-type "application/rss+xml"}
+           most-at   (fn [more]
+                       (reset! most 0)
+                       (hub/run-job! {:job :distribute :topic topic :content content}
+                                     (merge (options (atom (subscribed)) slow (atom [])) more))
+                       @most)]
+       (is (= 2 (most-at {})) "every subscriber at once, up to :concurrency")
+       (is (= 1 (most-at {:concurrency 1})) "and no more"))))
+
 (deftest deliveries-by-rules-of-the-hub
   (let [subscriptions (atom (subscribed))
         sent          (atom [])

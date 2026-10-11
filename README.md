@@ -36,7 +36,7 @@ from [Clojars](https://clojars.org/dk.simongray/websub-clj) to the
 `:deps` in your `deps.edn`:
 
 ```clojure
-dk.simongray/websub-clj {:mvn/version "0.1.0"}
+dk.simongray/websub-clj {:mvn/version "0.2.0"}
 ```
 
 For changes that aren't released yet, use the SHA of the latest commit on
@@ -67,8 +67,12 @@ Find the hubs of a topic with `discover!`:
 ```
 
 If you fetch the topic yourself, give the response to `discover` for the
-same map. Then subscribe to the topic at a hub, giving it a callback URL
-that nobody can guess and a secret to sign what it sends:
+same map. A feed that names a hub but no `rel="self"` link gives the hubs
+with a nil `:topic`, since WebSub takes the topic from that link. Many
+RSS feeds leave it out, so give `{:url-as-topic? true}` to take the URL
+that you fetched as the topic instead. Then subscribe to the topic at a
+hub, giving it a callback URL that nobody can guess and a secret to sign
+what it sends:
 
 ```clojure
 (def secret
@@ -102,10 +106,12 @@ The `:wanted-pred` says whether you asked for a subscription to the
 `:topic`, and `:deliver!` gets the bytes of each delivery signed with the
 secret. Return from it quickly, and read the feed afterwards.
 
-The check also gives `:wanted-pred` the `:lease-seconds` of the
-subscription. Before the lease ends, at the time that
-`websub/next-renewal` gives, subscribe again with a new callback URL.
-Discover the topic first, since it may have moved.
+Once `:wanted-pred` says yes, the handler confirms the subscription to
+the hub and calls `:verified!`, if you give one, with the `:mode`, the
+`:topic` and the `:lease-seconds` of the subscription. Keep the lease
+there, and before it ends, at the time that `websub/next-renewal` gives,
+subscribe again with a new callback URL. Discover the topic first, since
+it may have moved.
 
 ### Publish
 

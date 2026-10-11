@@ -109,7 +109,8 @@
     (is (= {:hubs [hub] :topic topic} (websub/discover {:url topic :headers {} :body atom-feed}))))
   (testing "a hub without a topic"
     (let [hub-alone (response "text/plain" "" (str "<" hub ">; rel=\"hub\""))]
-      (is (nil? (websub/discover hub-alone)) "names nothing to subscribe to, as WebSub 5.1 has it")
+      (is (= {:hubs [hub] :topic nil} (websub/discover hub-alone))
+          "names a hub, but no topic to subscribe to, as WebSub 5.1 has it")
       (is (= {:hubs [hub] :topic topic} (websub/discover hub-alone {:url-as-topic? true}))
           "unless the URL of the response counts")))
   (is (nil? (websub/discover (response "application/rss+xml" "<rss><channel><oops></rss>"))) "a feed that doesn't parse")
@@ -318,6 +319,8 @@
                {:wanted-pred     (fn [facts]
                                    (swap! came conj [:wanted (dissoc facts :request)])
                                    (= topic (:topic facts)))
+                :verified!       (fn [facts]
+                                   (swap! came conj [:verified (dissoc facts :request)]))
                 :deliver!        (fn [facts]
                                    (swap! came conj [:feed (update (dissoc facts :request) :body bytes/length)]))
                 :denied!         (fn [facts]
@@ -329,13 +332,17 @@
     (testing "the hub checks that the subscriber asked"
       (is (= {:status 200 :headers safe :body "abc-123_DEF.456"} (get! {"hub.mode" "subscribe"}))
           "the challenge, in a media type that no browser takes for a page")
-      (is (= [:wanted {:mode :subscribe :topic topic :lease-seconds 864000}] (peek @came)))
+      (let [check {:mode :subscribe :topic topic :lease-seconds 864000}]
+        (is (= [[:wanted check] [:verified check]] (take-last 2 @came))
+            "and the app learns that the subscription is confirmed, with its lease"))
       (is (= 200 (:status (get! {"hub.mode" "unsubscribe"}))))
-      (is (= [:wanted {:mode :unsubscribe :topic topic}] (peek @came))
+      (is (= [[:wanted {:mode :unsubscribe :topic topic}] [:verified {:mode :unsubscribe :topic topic}]]
+             (take-last 2 @came))
           "without the lease, which a subscriber ignores for an unsubscription")
       (is (= {:status 404 :headers safe :body ""}
              (get! {"hub.mode" "subscribe" "hub.topic" "https://example.org/other.xml"}))
           "205: a topic that the subscriber didn't ask for")
+      (is (= :wanted (first (peek @came))) "which isn't confirmed")
       (is (= "abc-123_DEF.456"
              (:body (serve {:request-method :get
                             :query-string   (str "hub.topic=mine&hub.mode=x&" (query {"hub.mode" "subscribe"}))})))

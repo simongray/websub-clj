@@ -79,6 +79,9 @@
     newer content, true
   - :max-form-bytes, the limit of a request to the hub, 64 kB
   - :max-bytes, the limit of a topic's content, 32 MB
+  - :concurrency, how many deliveries of a topic are under way at once,
+    16, so that a topic with thousands of subscribers doesn't open
+    thousands of connections
   - :allow-pred, url/public?, so that no request goes to the hub's own
     network
   - :send, http/send!
@@ -101,6 +104,7 @@
    :skip-stale?        true
    :max-form-bytes     65536
    :max-bytes          (* 32 1024 1024)
+   :concurrency        16
    :allow-pred         url/public?
    :send               http/send!
    :now-fn             #?(:clj  #(java.util.Date.)
@@ -595,12 +599,14 @@
                            :status status}}))))
 
 (defn- deliver-all!
-  "Deliver the `content` to each subscriber of the `topic` by `opts`, and
-  give their reports."
-  [topic content {:keys [store] :as opts}]
+  "Deliver the `content` to each subscriber of the `topic` by `opts`, at
+  most :concurrency at once, and give their reports."
+  [topic content {:keys [store concurrency] :as opts}]
   (async/then ((:subscriptions store) topic)
               (fn [subscriptions]
-                (async/all #(deliver-to! % content 0 opts) subscriptions))))
+                (async/in-groups #(deliver-to! % content 0 opts)
+                                 concurrency
+                                 subscriptions))))
 
 ;; WebSub 7
 (defn distribute!

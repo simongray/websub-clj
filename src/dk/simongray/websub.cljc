@@ -115,14 +115,16 @@
         ;; WebSub 5.1: the topic is the rel=self URL
         topic        (or (first (find "self"))
                          (when url-as-topic? url))]
-    (when (and hubs topic)
+    (when hubs
       {:hubs  (vec (distinct hubs))
        :topic topic})))
 
 ;; WebSub 4 and 8.1
 (defn discover
   "The hubs and the topic that the `response` names, as a map of :hubs and
-  :topic, by `opts`, or nil when it names no hub or no topic.
+  :topic, by `opts`, or nil when it names no hub. The :topic is nil when
+  it names a hub but no topic, e.g. an RSS feed without a rel=self, which
+  :url-as-topic? takes the URL of the response for.
 
   The response is a map of :url, :headers and :body, as http/send! gives
   it. For the hubs and for the topic alike, the Link headers count first,
@@ -447,12 +449,17 @@
 (defn- verification
   "The answer to the hub's GET `request` with the query `params`, by the
   `env` of the handler: to a check of intent, or to a denial."
-  [{:keys [wanted-pred denied! max-challenge] :as env} request params]
+  [{:keys [wanted-pred verified! denied! max-challenge] :as env}
+   request
+   params]
   (let [mode      (get params "hub.mode")
         topic     (get params "hub.topic")
         challenge (get params "hub.challenge")
         lease     (some-> (get params "hub.lease_seconds") parse-long)
-        facts     {:topic topic :request request}]
+        facts     {:topic topic :request request}
+        ;; WebSub 5.3: the lease of an unsubscription is ignored
+        check     (cond-> (assoc facts :mode (keyword mode))
+                    (= "subscribe" mode) (assoc :lease-seconds lease))]
     (cond
       ;; WebSub 5.2
       (= "denied" mode)
@@ -460,14 +467,14 @@
             (denied! (assoc facts :reason (get params "hub.reason"))))
           (ring/response 200 octets ""))
 
-      ;; WebSub 5.3.1, and 8.2 for the media type and nosniff; 5.3: the
-      ;; lease of an unsubscription is ignored
+      ;; WebSub 5.3.1, and 8.2 for the media type and nosniff
       (and (#{"subscribe" "unsubscribe"} mode)
            (string? topic)
            (challenge? challenge max-challenge)
-           (wanted-pred (cond-> (assoc facts :mode (keyword mode))
-                          (= "subscribe" mode) (assoc :lease-seconds lease))))
-      (ring/response 200 octets challenge)
+           (wanted-pred check))
+      (do (when verified!
+            (verified! check))
+          (ring/response 200 octets challenge))
 
       :else
       (ring/response 404 octets ""))))
@@ -513,6 +520,9 @@
 
   - :wanted-pred, a function of the :mode, :topic, :lease-seconds and
     :request of a check, which says whether the subscriber asked
+  - :verified!, a function of the same, called when the handler confirms
+    a check that :wanted-pred said yes to, e.g. to keep the lease and the
+    time to renew it
   - :deliver!, a function of the :body, :content-type, :topic, :hubs and
     :request of a delivery
   - :denied!, a function of the :topic, :reason and :request of a
@@ -527,8 +537,10 @@
 
   - It checks that the subscriber asked for the :mode, :subscribe or
     :unsubscribe, of the :topic. When :wanted-pred says yes, the handler
-    gives the hub's challenge back, and else it answers 404. The
-    :lease-seconds is how long the hub keeps a subscription.
+    gives the hub's challenge back, which confirms it, and calls
+    :verified!, and else it answers 404. The :lease-seconds is how long
+    the hub keeps a subscription, and next-renewal tells when to renew
+    it.
   - It delivers the topic, and :deliver! gets it as the bytes :body, if it
     has the signature that the :secret asks for. The handler answers 200
     when the delivery came, so :deliver! should return fast. It answers
