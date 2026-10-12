@@ -297,6 +297,29 @@
                     (is (= [:expired] (map :outcome (:deliveries report))))
                     (is (= {} @subscriptions) "no delivery after the lease, which ends the subscription"))))))
 
+(deftest jobs-as-edn
+  (let [verify  {:job :verify :mode :subscribe :topic topic :callback callback :lease-seconds 3600
+                 :secret (secret/hide "s3cr3t")}
+        content {:body (bytes/encode rss) :content-type "application/rss+xml" :published t0}
+        deliver {:job :deliver :topic topic :callback "https://a.example/cb" :attempt 1
+                 :at #inst "2026-10-10T12:31:00Z" :content content}
+        again   (comp hub/parse-job hub/format-job)]
+    (testing "a secret, revealed in the EDN and hidden again"
+      (is (str/includes? (hub/format-job verify) "s3cr3t"))
+      (is (secret/hidden? (:secret (again verify))))
+      (is (= (update verify :secret secret/reveal) (update (again verify) :secret secret/reveal))))
+    (testing "the bytes of a topic, in base64url"
+      (is (= rss (bytes/decode (get-in (again deliver) [:content :body]))))
+      (is (= (update deliver :content dissoc :body) (update (again deliver) :content dissoc :body))))
+    (is (= {:job :distribute :topic topic} (again {:job :distribute :topic topic})))
+    (let [sent (atom [])
+          opts (options (atom (subscribed)) (subscriber sent) (atom []))]
+      (run
+       #(async/then (hub/run-job! (again (assoc deliver :attempt 0)) opts)
+                    (fn [report]
+                      (is (= :delivered (:outcome report)) "and a job read back runs")
+                      (is (= rss (bytes/decode (:body (peek @sent)))))))))))
+
 #?(:clj
    (deftest deliveries-at-once
      (let [in-flight (atom 0)

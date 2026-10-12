@@ -223,13 +223,17 @@
   - :secret-over-http?, as default-options has it
 
   A request with a secret goes to the hub over https, even when the hub is
-  an http URL, unless :secret-over-http?."
+  an http URL, unless :secret-over-http?. Such a request keeps the http
+  URL under ::http-url, so that call! can say why it used https."
   ([mode hub topic callback]
    (request mode hub topic callback {}))
   ([mode hub topic callback
     {:keys [lease-seconds params secret-over-http?] :as opts}]
    {:pre [(map? opts)]}
-   (let [secret (secret/reveal (:secret opts))]
+   (let [secret   (secret/reveal (:secret opts))
+         upgrade? (and secret
+                       (not secret-over-http?)
+                       (= "http" (url/scheme hub)))]
      (when-let [problem (request-problem mode hub topic callback
                                          lease-seconds secret)]
        (throw (ex-info problem {:mode          mode
@@ -238,15 +242,15 @@
                                 :callback      callback
                                 :lease-seconds lease-seconds})))
      ;; WebSub 5.1 and 8.2: a secret goes over https alone
-     (cond-> (form-request (cond-> hub
-                             (and secret (not secret-over-http?)) https-url)
+     (cond-> (form-request (cond-> hub upgrade? https-url)
                            (concat [["hub.callback" callback]
                                     ["hub.mode" (name mode)]
                                     ["hub.topic" topic]
                                     ["hub.lease_seconds" lease-seconds]
                                     ["hub.secret" secret]]
                                    params))
-       secret (update :body secret/hide)))))
+       secret   (update :body secret/hide)
+       upgrade? (assoc ::http-url hub)))))
 
 ;; WebSub 4
 (defn links
@@ -325,6 +329,25 @@
                      (send-on! send (assoc request :url location) (dec n))
                      response))))))
 
+(defn- secret-over-https!
+  "Send the `request` with `send` to the https URL of an http hub at
+  `http-url`, which it has since it holds a secret, or else throw
+  ::https-failed, which says why https."
+  [send request http-url]
+  (async/then (async/attempt #(send-on! send request))
+              (fn [{:keys [value error]}]
+                (if error
+                  (throw (ex-info (str "The hub " http-url " was asked over "
+                                       "https, since a secret goes over https "
+                                       "alone, and that failed. To send the "
+                                       "secret over http, give "
+                                       ":secret-over-http? true.")
+                                  {:type ::https-failed
+                                   :hub  http-url
+                                   :url  (:url request)}
+                                  error))
+                  value))))
+
 (defn- send-to-hub!
   "Send the `request` with `send` to its hub, by the `opts` of call!. An
   http hub gets it over https first, and over http when that fails, unless
@@ -334,13 +357,16 @@
   (let [url   (:url request)
         https (update request :url https-url)]
     (cond
+      (::http-url request)
+      (secret-over-https! send request (::http-url request))
+
       (not= "http" (url/scheme url))
       (send-on! send request)
 
       ;; WebSub 5.1: a secret goes over https alone
       (and (secret/hidden? (:body request))
            (not secret-over-http?))
-      (send-on! send https)
+      (secret-over-https! send https url)
 
       ;; WebSub 8.2: subscribers favour https for hubs
       prefer-https?
@@ -363,8 +389,10 @@
   A hub answers 202 to a subscription request that it takes, and then
   calls the callback to check it. A status that isn't a success throws
   ::failed with the :status and the :message of the hub. An http hub is
-  tried over https first, a request with a secret goes over https alone,
-  and a 307 or 308 sends the request on to the hub it names.
+  tried over https first, and a 307 or 308 sends the request on to the
+  hub it names. A request with a secret goes over https alone, and when
+  that fails, the throw is ::https-failed, with the http URL of the :hub
+  and the cause.
 
   The `opts` are the limits, :allow-pred and :user-agent of http/send!,
   :send, a function that sends a request map in place of http/send!, and

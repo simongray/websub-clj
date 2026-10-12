@@ -132,9 +132,10 @@
             "hub.secret"        shared-secret}
            (url/query-params (:body (http/revealed r)))))
     (is (not (str/includes? (pr-str r) shared-secret)) "a request that is printed doesn't show the secret"))
-  (is (= "https://hub.example.org/"
-         (:url (websub/request :subscribe "http://hub.example.org/" topic callback {:secret shared-secret})))
-      "a secret goes over https alone")
+  (is (= ["https://hub.example.org/" "http://hub.example.org/"]
+         ((juxt :url ::websub/http-url)
+          (websub/request :subscribe "http://hub.example.org/" topic callback {:secret shared-secret})))
+      "a secret goes over https alone, and the request keeps the http URL")
   (is (= "http://hub.example.org/"
          (:url (websub/request :subscribe "http://hub.example.org/" topic callback
                                {:secret shared-secret :secret-over-http? true})))
@@ -229,8 +230,22 @@
                                    (throw (ex-info "No TLS" {}))
                                    {:status 202})))
                       (fn [{:keys [error]}]
-                        (is (some? error))
+                        (is (= {:type ::websub/https-failed :hub "http://hub.example.org/" :url "https://hub.example.org/"}
+                               (ex-data error))
+                            "a throw that says why https")
+                        (is (= "No TLS" (ex-message (ex-cause error))))
                         (is (= ["https://hub.example.org/"] (map :url @sent)) "but never with a secret"))))
+     #(do (reset! sent [])
+          (async/then (attempt (websub/request :subscribe "http://hub.example.org/" topic callback {:secret shared-secret})
+                               (fn [r]
+                                 (if (tls? r)
+                                   (throw (ex-info "No TLS" {}))
+                                   {:status 202})))
+                      (fn [{:keys [error]}]
+                        (is (= ::websub/https-failed (:type (ex-data error))))
+                        (is (str/includes? (ex-message error) ":secret-over-http? true"))
+                        (is (= ["https://hub.example.org/"] (map :url @sent))
+                            "for a request that names an http hub, too"))))
      #(do (reset! sent [])
           (async/then (attempt (assoc request :url "http://hub.example.org:8080/" :timeout-seconds 2)
                                (constantly {:status 202}))

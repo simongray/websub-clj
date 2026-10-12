@@ -36,7 +36,7 @@ from [Clojars](https://clojars.org/dk.simongray/websub-clj) to the
 `:deps` in your `deps.edn`:
 
 ```clojure
-dk.simongray/websub-clj {:mvn/version "0.3.0"}
+dk.simongray/websub-clj {:mvn/version "0.4.0"}
 ```
 
 For changes that aren't released yet, use the SHA of the latest commit on
@@ -85,6 +85,11 @@ what it sends:
                               {:secret secret}))
 ;; => {:status 202 :url "https://pubsubhubbub.superfeedr.com/"}
 ```
+
+A secret goes over https alone, so a hub with an http URL gets the
+request at its https URL. If that fails, `call!` throws
+`:dk.simongray.websub/https-failed`, and `{:secret-over-http? true}`
+sends it over http instead.
 
 Serve the callback URL with a Ring handler. The hub first checks that you
 asked for the subscription, and then it delivers each new version of the
@@ -165,6 +170,44 @@ of two functions, so one for a database takes a few lines. The options
 that have defaults, e.g. the leases and the retries, are in
 `hub/default-options`, and the docstrings of `hub/handler` and
 `hub/run-job!` describe the others.
+
+A queue in a database keeps the jobs through a restart. Write a job as
+text with `hub/format-job`, which reveals its secret and puts its bytes
+in base64url, and read it back with `hub/parse-job`. For example, with
+[next.jdbc](https://github.com/seancorfield/next-jdbc) and this table in
+PostgreSQL:
+
+```sql
+CREATE TABLE hub_jobs (id     BIGSERIAL PRIMARY KEY,
+                       run_at TIMESTAMPTZ NOT NULL,
+                       job    TEXT NOT NULL);
+```
+
+```clojure
+(require '[next.jdbc :as jdbc])
+
+(defn schedule!
+  "Queue the `job` in the database `db`, to run at its :at, or at once."
+  [db job]
+  (jdbc/execute! db ["INSERT INTO hub_jobs (run_at, job) VALUES (?, ?)"
+                     (or (:at job) (java.util.Date.))
+                     (hub/format-job job)]))
+
+(defn run-due-jobs!
+  "Run the jobs in the database `db` that are due, by the hub's `opts`."
+  [db opts]
+  (doseq [{:hub_jobs/keys [id job]}
+          (jdbc/execute! db [(str "SELECT id, job FROM hub_jobs"
+                                  " WHERE run_at <= ? ORDER BY run_at")
+                             (java.util.Date.)])]
+    (hub/run-job! (hub/parse-job job) opts)
+    (jdbc/execute! db ["DELETE FROM hub_jobs WHERE id = ?" id])))
+```
+
+Give the hub `(partial schedule! db)` as its `:schedule!`, and call
+`run-due-jobs!` from one worker every few seconds. A job is deleted once
+it has run, so one that a crash stops runs again. The text holds the
+secrets of subscriptions, so keep the table as safe as the store.
 
 Principles
 ----------

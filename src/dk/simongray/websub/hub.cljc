@@ -11,7 +11,8 @@
 
   The code follows sections 5 to 8 of the W3C Recommendation of 2 June
   2026, https://www.w3.org/TR/websub/."
-  (:require [clojure.string :as str]
+  (:require #?(:clj [clojure.edn :as edn] :cljs [cljs.reader :as edn])
+            [clojure.string :as str]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
             [dk.simongray.wary-fetch.bytes :as bytes]
@@ -656,6 +657,33 @@
     :distribute (distribute! job opts)
     :deliver    (deliver! job opts)
     :deny       (deny! job opts)))
+
+;; A job holds a hidden secret and the bytes of a topic, which EDN can't
+;; print, so they're text and base64url in the EDN of a job
+(defn format-job
+  "The `job` as EDN, e.g. for a queue in a database, with its :secret
+  revealed and the bytes of its content in base64url. Keep it as safe as
+  the subscriptions, since it can hold a subscriber's secret."
+  [job]
+  (binding [*print-length* nil
+            *print-level*  nil]
+    (pr-str (cond-> job
+              (:secret job)
+              (update :secret secret/reveal)
+
+              (some? (get-in job [:content :body]))
+              (update-in [:content :body] bytes/base64url)))))
+
+(defn parse-job
+  "The job in the EDN `s` that format-job gives."
+  [s]
+  (let [job (edn/read-string s)]
+    (cond-> job
+      (:secret job)
+      (update :secret secret/hide)
+
+      (string? (get-in job [:content :body]))
+      (update-in [:content :body] bytes/unbase64url))))
 
 #?(:clj
    (comment
