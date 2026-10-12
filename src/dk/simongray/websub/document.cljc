@@ -4,10 +4,10 @@
   subscriber that has had them."
   (:require [clojure.string :as str]
             [dk.simongray.html-pieces :as html]
-            [dk.simongray.html-pieces.url :as url]
             [dk.simongray.qname-hiccup :as xml]
             [dk.simongray.wary-fetch.bytes :as bytes]
-            [dk.simongray.wary-fetch.headers :as headers]))
+            [dk.simongray.wary-fetch.headers :as headers]
+            [dk.simongray.whatwg-url :as url]))
 
 (def atom-uri
   "The namespace of Atom."

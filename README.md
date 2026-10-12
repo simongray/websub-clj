@@ -36,7 +36,7 @@ from [Clojars](https://clojars.org/dk.simongray/websub-clj) to the
 `:deps` in your `deps.edn`:
 
 ```clojure
-dk.simongray/websub-clj {:mvn/version "0.2.1"}
+dk.simongray/websub-clj {:mvn/version "0.3.0"}
 ```
 
 For changes that aren't released yet, use the SHA of the latest commit on
@@ -177,8 +177,9 @@ Principles
   function that sends takes a `:send` of your own.
 - **One codebase.** The library is written in `.cljc` and depends on
   [wary-fetch](https://github.com/simongray/wary-fetch) for requests,
-  [qname-hiccup](https://github.com/simongray/qname-hiccup) for feeds and
-  [html-pieces](https://github.com/simongray/html-pieces) for pages.
+  [qname-hiccup](https://github.com/simongray/qname-hiccup) for feeds,
+  [html-pieces](https://github.com/simongray/html-pieces) for pages and
+  [whatwg-url](https://github.com/simongray/whatwg-url) for their URLs.
 
 Development
 -----------
