@@ -36,7 +36,7 @@ from [Clojars](https://clojars.org/dk.simongray/websub-clj) to the
 `:deps` in your `deps.edn`:
 
 ```clojure
-dk.simongray/websub-clj {:mvn/version "0.5.0"}
+dk.simongray/websub-clj {:mvn/version "0.5.1"}
 ```
 
 For changes that aren't released yet, use the SHA of the latest commit on

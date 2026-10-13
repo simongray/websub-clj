@@ -6,11 +6,11 @@
  ;; html-pieces reads the links of a page, and whatwg-url resolves the URLs
  ;; of both. whatwg-mime tells a feed from a page.
  :deps  {org.clojure/clojure       {:mvn/version "1.11.4"}
-         dk.simongray/wary-fetch   {:mvn/version "0.6.0"}
-         dk.simongray/qname-hiccup {:mvn/version "0.3.0"}
+         dk.simongray/wary-fetch   {:mvn/version "0.6.2"}
+         dk.simongray/qname-hiccup {:mvn/version "0.4.0"}
          dk.simongray/html-pieces  {:mvn/version "0.6.0"}
          dk.simongray/whatwg-url   {:mvn/version "0.1.0"}
-         dk.simongray/whatwg-mime  {:mvn/version "0.1.0"}}
+         dk.simongray/whatwg-mime  {:mvn/version "0.2.0"}}
 
  :aliases
  {;; clojure -X:test
