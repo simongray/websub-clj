@@ -90,7 +90,11 @@
         "atom:links by any prefix, against their xml:base")
     (is (= {:hubs ["https://example.org/podcast/hub"] :topic "https://example.org/podcast/feed.xml"}
            (websub/discover (assoc (response "text/xml" rss-feed) :body (bytes/encode rss-feed))))
-        "a body of bytes"))
+        "a body of bytes")
+    (doseq [content-type ["text/html" "text/plain" "application/octet-stream"]]
+      (is (= {:hubs ["https://example.org/podcast/hub"] :topic "https://example.org/podcast/feed.xml"}
+             (websub/discover (response content-type rss-feed)))
+          (str "served as " content-type))))
   (testing "104: the Link headers before the document"
     (is (= {:hubs ["https://header.example.org/"] :topic topic}
            (websub/discover (response "application/atom+xml" atom-feed (links "https://header.example.org/" topic)))))

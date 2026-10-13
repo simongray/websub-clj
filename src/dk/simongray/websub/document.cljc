@@ -6,7 +6,8 @@
             [dk.simongray.html-pieces :as html]
             [dk.simongray.qname-hiccup :as xml]
             [dk.simongray.wary-fetch.bytes :as bytes]
-            [dk.simongray.wary-fetch.headers :as headers]
+            [dk.simongray.whatwg-mime :as mime]
+            [dk.simongray.whatwg-mime.patterns :as patterns]
             [dk.simongray.whatwg-url :as url]))
 
 (def atom-uri
@@ -64,33 +65,36 @@
       {:rel rel :href (absolute (rebased base link) href)})))
 
 (defn- text
-  "The `body` of a response as text, decoded by its `charset` when it's
+  "The `body` of a response as text, decoded by its `encoding` when it's
   bytes."
-  [body charset]
+  [body encoding]
   (if (string? body)
     body
-    (some-> body (xml/decode charset))))
+    (some-> body (xml/decode encoding))))
 
-;; RFC 9110, section 8.3: a document without a media type can be examined
+(defn- start
+  "The first bytes of the `body` of a response, in UTF-8 when it's text."
+  [body]
+  (if (string? body)
+    (bytes/encode (subs body 0 (min (count body) patterns/resource-header-length)))
+    body))
+
+;; MIME Sniffing, section 7, with its rules until 2024 for a feed served as
+;; HTML, since a feed names its hubs whatever its type
 (defn kind
-  "The kind of the document `s` of `media-type`, :html or :xml, or nil for
-  another. Without a media type, its start tells."
-  [media-type s]
-  (cond
-    (#{"text/html" "application/xhtml+xml"} media-type)
-    :html
+  "The kind of the document whose first bytes are `b`, of the MIME type
+  `m`: :html, :xml or nil for another."
+  [b m]
+  (let [computed (mime/sniff b m)]
+    (cond
+      (patterns/feed-type b)
+      :xml
 
-    (some->> media-type (re-find #"[/+]xml$"))
-    :xml
+      (#{"text/html" "application/xhtml+xml"} (mime/essence computed))
+      :html
 
-    (or media-type (not (string? s)))
-    nil
-
-    (re-find #"(?i)^\s*<(!doctype html|html)" s)
-    :html
-
-    (re-find #"^\s*<" s)
-    :xml))
+      (mime/xml? computed)
+      :xml)))
 
 (defn links
   "The links that the document in the `response` names for itself, as maps
@@ -98,10 +102,10 @@
   all of it by :body-links?, or the atom:links of an Atom or RSS feed. Nil
   for another document, or one that doesn't parse."
   [{:keys [url headers body] :as response} {:keys [body-links?] :as opts}]
-  (let [type (headers/media-type (headers/header headers "content-type"))
-        s    (text body (headers/charset headers))]
+  (let [type (mime/extract (get headers "content-type"))
+        s    (text body (mime/encoding type))]
     (try
-      (case (kind type s)
+      (case (kind (start body) type)
         :html (page-links s url body-links?)
         :xml  (feed-links s url)
         nil)

@@ -21,7 +21,8 @@
             [dk.simongray.wary-fetch.url :as url]
             [dk.simongray.websub :as websub]
             [dk.simongray.websub.document :as document]
-            [dk.simongray.websub.ring :as ring]))
+            [dk.simongray.websub.ring :as ring]
+            [dk.simongray.whatwg-mime :as mime]))
 
 ;; WebSub 5.1.1: decode the characters that need no percent-encoding, which
 ;; RFC 3986, section 2.3, names
@@ -486,7 +487,7 @@
   [{:keys [delivered] :as subscription}
    {:keys [body content-type] :as content}
    {:keys [diff?] :as opts}]
-  (let [charset (headers/charset {"content-type" content-type})
+  (let [charset (mime/charset content-type)
         fewer   (when diff?
                   (document/diff body charset (or delivered #{})))]
     (cond-> content
