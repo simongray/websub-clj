@@ -4,8 +4,9 @@
                          :output-to "target/node-tests.js"
                          :ns-regexp "-test$"
                          :autorun   true}
-          ;; clojure -M:cljs compile browser-test, then serve
-          ;; target/browser-test
+          ;; clojure -M:cljs compile browser-test, then
+          ;; node test/browser-run.mjs target/browser-test
           :browser-test {:target    :browser-test
                          :test-dir  "target/browser-test"
-                         :ns-regexp "-test$"}}}
+                         :ns-regexp "-test$"
+                         :runner-ns dk.simongray.websub.browser-runner}}}

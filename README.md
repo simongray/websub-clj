@@ -233,9 +233,10 @@ Development
 
 ```bash
 clojure -X:test                       # the tests on the JVM
-npm install                           # once, for the Node tests
+npm install                           # once, for ClojureScript
 clojure -M:cljs compile test          # the tests in Node
-clojure -M:cljs compile browser-test  # for a browser, from target/browser-test
+clojure -M:cljs compile browser-test  # the tests in a browser
+node test/browser-run.mjs             # run them in a headless Chrome
 ```
 
 On the JVM, a test also runs a subscriber, a publisher and a hub against
