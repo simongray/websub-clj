@@ -21,7 +21,10 @@ standard: the subscriber, the publisher and the hub.
   compared in constant time, and the hub only sends to public addresses,
   never to its own network.
 
-The same code runs on the JVM, in Node and in the browser.
+The same code runs on the JVM, in Node and in the browser. A page can
+discover the hub of a topic and publish to it, with a `:send` of your own
+where CORS stops the request, but it can't subscribe, since a subscriber
+needs a callback URL that the hub can reach.
 
 > This library was spun out of [podcast-clj](https://github.com/simongray/podcast-clj),
 > a library for making podcast software, where servers use it to get new
@@ -109,7 +112,11 @@ topic:
 
 The `:wanted-pred` says whether you asked for a subscription to the
 `:topic`, and `:deliver!` gets the bytes of each delivery signed with the
-secret. Return from it quickly, and read the feed afterwards.
+secret. Return from it quickly, and read the feed afterwards. The
+`:topic` of a delivery is the one that the hub names in a Link header,
+and nil when it sends none, so give each subscription a callback URL of
+its own: the `:request` of a delivery has that URL, which tells you the
+subscription.
 
 Once `:wanted-pred` says yes, the handler confirms the subscription to
 the hub and calls `:verified!`, if you give one, with the `:mode`, the
@@ -227,6 +234,16 @@ Principles
   [whatwg-url](https://github.com/simongray/whatwg-url) for their URLs and
   [whatwg-mime](https://github.com/simongray/whatwg-mime) to tell a feed
   from a page.
+
+Versions
+--------
+
+Until 1.0, a release that changes the API gets a new minor version, e.g.
+from 0.4.2 to 0.5.0, and one that only fixes gets a new patch version,
+e.g. from 0.4.2 to 0.4.3. A function that's renamed or removed goes
+without a deprecated alias, and the commit of each release says what
+changed. The tests run in CI on Java 11 and 25, in Node and in a
+headless Chrome.
 
 Development
 -----------
