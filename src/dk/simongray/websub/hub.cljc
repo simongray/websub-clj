@@ -15,10 +15,10 @@
             [clojure.string :as str]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
-            [dk.simongray.wary-fetch.bytes :as bytes]
             [dk.simongray.wary-fetch.headers :as headers]
             [dk.simongray.wary-fetch.secret :as secret]
             [dk.simongray.wary-fetch.url :as url]
+            [dk.simongray.webcrypto.bytes :as bytes]
             [dk.simongray.websub :as websub]
             [dk.simongray.websub.document :as document]
             [dk.simongray.websub.ring :as ring]
@@ -684,7 +684,7 @@
       (update :secret secret/hide)
 
       (string? (get-in job [:content :body]))
-      (update-in [:content :body] bytes/unbase64url))))
+      (update-in [:content :body] bytes/from-base64url))))
 
 #?(:clj
    (comment

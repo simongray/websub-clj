@@ -220,6 +220,8 @@ Principles
   function that sends takes a `:send` of your own.
 - **One codebase.** The library is written in `.cljc` and depends on
   [wary-fetch](https://github.com/simongray/wary-fetch) for requests,
+  [webcrypto-clj](https://github.com/simongray/webcrypto-clj) for their
+  signatures,
   [qname-hiccup](https://github.com/simongray/qname-hiccup) for feeds,
   [html-pieces](https://github.com/simongray/html-pieces) for pages,
   [whatwg-url](https://github.com/simongray/whatwg-url) for their URLs and

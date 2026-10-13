@@ -5,7 +5,7 @@
   (:require [clojure.string :as str]
             [dk.simongray.html-pieces :as html]
             [dk.simongray.qname-hiccup :as xml]
-            [dk.simongray.wary-fetch.bytes :as bytes]
+            [dk.simongray.webcrypto.bytes :as bytes]
             [dk.simongray.whatwg-mime :as mime]
             [dk.simongray.whatwg-mime.patterns :as patterns]
             [dk.simongray.whatwg-url :as url]))

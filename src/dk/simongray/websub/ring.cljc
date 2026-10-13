@@ -2,8 +2,8 @@
   "The Ring requests that a subscriber's callback and a hub take, and the
   answers they give."
   (:require [clojure.string :as str]
-            [dk.simongray.wary-fetch.bytes :as bytes]
-            [dk.simongray.wary-fetch.url :as url])
+            [dk.simongray.wary-fetch.url :as url]
+            [dk.simongray.webcrypto.bytes :as bytes])
   #?(:clj (:import [java.io InputStream])))
 
 (defn body-bytes

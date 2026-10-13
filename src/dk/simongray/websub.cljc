@@ -10,10 +10,12 @@
   (:require [clojure.string :as str]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
-            [dk.simongray.wary-fetch.bytes :as bytes]
             [dk.simongray.wary-fetch.headers :as headers]
             [dk.simongray.wary-fetch.secret :as secret]
             [dk.simongray.wary-fetch.url :as url]
+            [dk.simongray.webcrypto :as webcrypto]
+            [dk.simongray.webcrypto.bytes :as bytes]
+            [dk.simongray.webcrypto.hash :as hash]
             [dk.simongray.websub.document :as document]
             [dk.simongray.websub.ring :as ring]))
 
@@ -62,11 +64,11 @@
    :max-challenge          512})
 
 (def ^:no-doc algorithms
-  "The HMAC algorithm of each signature method."
-  {"sha1"   :sha1
-   "sha256" :sha256
-   "sha384" :sha384
-   "sha512" :sha512})
+  "The hash of the HMAC of each signature method."
+  {"sha1"   :sha-1
+   "sha256" :sha-256
+   "sha384" :sha-384
+   "sha512" :sha-512})
 
 (defn ^:no-doc later
   "The instant `seconds` after the instant `at`."
@@ -84,7 +86,7 @@
   ([]
    (token 32))
   ([n]
-   (bytes/base64url (bytes/random n))))
+   (bytes/base64url (webcrypto/random-bytes n))))
 
 ;; RFC 8288, section 3.3
 (defn- relation?
@@ -439,7 +441,7 @@
   [method secret body]
   (when-let [algorithm (algorithms method)]
     (let [k (bytes/encode (secret/reveal secret))]
-      (str method "=" (bytes/hex (bytes/hmac algorithm k body))))))
+      (str method "=" (bytes/hex (hash/hmac algorithm k body))))))
 
 ;; WebSub 7.1.2 and 8.3
 (defn signed?
