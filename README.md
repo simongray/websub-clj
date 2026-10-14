@@ -51,7 +51,9 @@ In shadow-cljs, a Git dependency only works through `deps.edn`, so set
 Subscribing
 -----------
 
-Find the hubs of a topic with `discover!`:
+### Finding the hub
+
+Find the hubs of a topic with `websub/discover!`:
 
 ```clojure
 (require '[dk.simongray.websub :as websub])
@@ -62,13 +64,17 @@ Find the hubs of a topic with `discover!`:
 ;;     :topic  "https://simon.grays.blog/feed"}
 ```
 
-If you fetch the topic yourself, give the response to `discover` for the
-same map. A feed that names a hub but no `rel="self"` link gives the hubs
-with a nil `:topic`, since WebSub takes the topic from that link. Many
-RSS feeds leave it out, so give `{:url-as-topic? true}` to take the URL
-that you fetched as the topic instead. Then subscribe to the topic at a
-hub, giving it a callback URL that nobody can guess and a secret to sign
-what it sends:
+If you fetch the topic yourself, give the response to `websub/discover`
+instead, for the same map.
+
+WebSub takes the topic from a feed's `rel="self"` link, and many RSS
+feeds leave it out. The map then has the hubs but no topic. To take the
+URL that you fetched as the topic instead, give `{:url-as-topic? true}`.
+
+### Subscribing at a hub
+
+Subscribe to the topic at one of its hubs, with a callback URL that
+nobody can guess and a secret for the hub to sign what it sends:
 
 ```clojure
 (def secret
@@ -82,10 +88,12 @@ what it sends:
 ;; => {:status 202 :url "https://pubsubhubbub.superfeedr.com/"}
 ```
 
-A secret goes over https alone, so a hub with an http URL gets the
-request at its https URL. If that fails, `call!` throws
+A secret only goes over https, so a hub with an http URL gets the request
+at its https URL. When that fails, the call throws
 `:dk.simongray.websub/https-failed`, and `{:secret-over-http? true}`
-sends it over http instead.
+sends the request over http instead.
+
+### Receiving deliveries
 
 Serve the callback URL with a Ring handler. The hub first checks that you
 asked for the subscription, and then it delivers each new version of the
@@ -103,18 +111,21 @@ topic:
                    :secret      secret}))
 ```
 
-The `:wanted-pred` says whether you asked for a subscription to the
-`:topic`, and `:deliver!` gets the bytes of each delivery signed with the
-secret. Return from it quickly, and read the feed afterwards. The
-`:topic` of a delivery is the one that the hub names in a Link header,
-and nil when it sends none, so give each subscription a callback URL of
-its own: the `:request` of a delivery has that URL, which tells you the
-subscription.
+The `:wanted-pred` says whether you asked for a subscription to a topic.
+The `:deliver!` function gets the bytes of each delivery that the hub
+signed with your secret, so return from it quickly, and read the feed
+afterwards.
+
+A hub names the topic of a delivery in a Link header, and when it sends
+none, the delivery has no topic. So give each subscription a callback URL
+of its own, which the `:request` of a delivery has.
+
+### Renewing
 
 Once `:wanted-pred` says yes, the handler confirms the subscription to
-the hub and calls `:verified!`, if you give one, with the `:mode`, the
-`:topic` and the `:lease-seconds` of the subscription. Keep the lease
-there, and before it ends, at the time that `websub/next-renewal` gives,
+the hub. It then calls your `:verified!`, if you give one, with the
+`:mode`, `:topic` and `:lease-seconds` of the subscription. Keep the
+lease, and before it ends, at the time that `websub/next-renewal` gives,
 subscribe again with a new callback URL. Discover the topic first, since
 it may have moved.
 
@@ -164,14 +175,17 @@ queue in a database:
   (hub/handler opts))
 ```
 
-The handler answers subscribers and publishers right away, and gives the
-work that follows to `schedule!`: a check of a subscription, or the
-delivery of a topic that changed. A delivery that fails goes to
-`schedule!` again as a retry, with the `:at` to run it. A store is a map
-of two functions, so one for a database takes a few lines. The options
-that have defaults, e.g. the leases and the retries, are in
-`hub/default-options`, and the docstrings of `hub/handler` and
-`hub/run-job!` describe the others.
+The handler answers subscribers and publishers right away. The work that
+follows, the check of a subscription or the delivery of a topic that
+changed, goes to your `schedule!` as a job. A delivery that fails comes
+back as a retry, with the `:at` to run it.
+
+A store is a map of two functions, so one over a database takes a few
+lines. The defaults of the options, e.g. the leases and the retries, are
+in `hub/default-options`, and the docstrings of `hub/handler` and
+`hub/run-job!` describe the rest.
+
+### Jobs in a database
 
 A queue in a database keeps the jobs through a restart. Write a job as
 text with `hub/format-job`, which reveals its secret and puts its bytes
