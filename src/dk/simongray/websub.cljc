@@ -355,11 +355,23 @@
 (defn- secret-over-https!
   "Send the `request` with `send` to the https URL of an http hub at
   `http-url`, which it has since it holds a secret, or else throw
-  ::https-failed, which says why https."
+  ::https-failed, which says why https.
+
+  When http would fail the same way, it rethrows the failure itself: a hub
+  that :allow-pred refuses, a name that doesn't resolve or a stop by the
+  :signal."
   [send request http-url]
   (async/then (async/attempt #(send-on! send request))
               (fn [{:keys [value error]}]
-                (if error
+                (cond
+                  (nil? error)
+                  value
+
+                  (#{::http/refused ::http/unresolved ::http/aborted}
+                   (:type (ex-data error)))
+                  (throw error)
+
+                  :else
                   (throw (ex-info (str "The hub " http-url " was asked over "
                                        "https, since a secret goes over https "
                                        "alone, and that failed. To send the "
@@ -368,8 +380,7 @@
                                   {:type ::https-failed
                                    :hub  http-url
                                    :url  (:url request)}
-                                  error))
-                  value))))
+                                  error))))))
 
 (defn- send-to-hub!
   "Send the `request` with `send` to its hub, by the `opts` of call!. An
@@ -413,9 +424,10 @@
   calls the callback to check it. A status that isn't a success throws
   ::failed with the :status and the :message of the hub. An http hub is
   tried over https first, and a 307 or 308 sends the request on to the
-  hub it names. A request with a secret goes over https alone, and when
-  that fails, the throw is ::https-failed, with the http URL of the :hub
-  and the cause.
+  hub it names. A request with a secret goes over https alone. When that
+  fails, it throws ::https-failed with the http URL of the :hub and the
+  cause. It throws the failure itself when http would fail the same way,
+  e.g. when :allow-pred refuses the hub.
 
   The `opts` are the limits, :allow-pred and :user-agent of http/send!,
   :send, a function that sends a request map in place of http/send!, and

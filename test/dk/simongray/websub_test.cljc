@@ -250,6 +250,21 @@
                         (is (str/includes? (ex-message error) ":secret-over-http? true"))
                         (is (= ["https://hub.example.org/"] (map :url @sent))
                             "for a request that names an http hub, too"))))
+     #(async/then (async/attempt
+                   (fn []
+                     (websub/call! (websub/request :subscribe "http://127.0.0.1:9/hub" topic callback
+                                                   {:secret shared-secret})
+                                   {:allow-pred url/public?})))
+                  (fn [{:keys [error]}]
+                    (is (= {:type ::http/refused :url "https://127.0.0.1:9/hub"} (ex-data error))
+                        "but a hub that :allow-pred refuses throws the refusal, since http is refused too")))
+     #(async/then (async/all (fn [failure]
+                               (attempt (assoc request :url "http://hub.example.org/" :body (secret/hide "hub.secret=x"))
+                                        (fn [_] (throw (ex-info "Not over http either" {:type failure})))))
+                             [::http/unresolved ::http/aborted])
+                  (fn [results]
+                    (is (= [::http/unresolved ::http/aborted] (map (comp :type ex-data :error) results))
+                        "and so does a name that doesn't resolve or a stop by the :signal")))
      #(do (reset! sent [])
           (async/then (attempt (assoc request :url "http://hub.example.org:8080/" :timeout-seconds 2)
                                (constantly {:status 202}))
