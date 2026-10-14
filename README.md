@@ -122,12 +122,66 @@ of its own, which the `:request` of a delivery has.
 
 ### Renewing
 
-Once `:wanted-pred` says yes, the handler confirms the subscription to
-the hub. It then calls your `:verified!`, if you give one, with the
-`:mode`, `:topic` and `:lease-seconds` of the subscription. Keep the
-lease, and before it ends, at the time that `websub/next-renewal` gives,
-subscribe again with a new callback URL. Discover the topic first, since
-it may have moved.
+A hub keeps a subscription for the length of its lease, so you subscribe
+again before the lease ends. To keep track of the leases, keep your
+subscriptions in a map by an id of your own, e.g. the feed's. Record each
+request with `websub/asked` before you send it, and take the handler's
+options from the map:
+
+```clojure
+(def subscriptions
+  (atom {}))
+
+(defn now
+  "The instant now."
+  []
+  (java.util.Date.))
+
+(defn subscribe!
+  "Ask the hub with the `request` for the subscription of `id`."
+  [id request]
+  (swap! subscriptions websub/asked id request (now))
+  (websub/call! request))
+
+(def callback
+  (websub/handler
+   (merge (websub/handler-options #(deref subscriptions))
+          {:deliver!  (fn [{:keys [body request]}]
+                        (let [[id] (websub/subscription-of @subscriptions
+                                                           request)]
+                          (swap! deliveries conj [id body])))
+           :verified! #(swap! subscriptions websub/verified % (now))
+           :denied!   #(swap! subscriptions websub/denied % (now))})))
+```
+
+The handler then confirms only the requests in the map, and it updates
+the map with `websub/verified` and `websub/denied`. A confirmed
+subscription is `:active`, with its lease and the time to renew it. A
+denied one is `:denied`, since WebSub says that a denial is final.
+
+Every hour or so, send the requests that `websub/due` gives:
+
+```clojure
+(defn new-callback
+  "A new callback URL for the `subscription` of `id`."
+  [id subscription]
+  (str "https://app.example.net/websub/" (websub/token)))
+
+(doseq [[id request] (websub/due @subscriptions (now) new-callback)]
+  (subscribe! id request))
+```
+
+That renews each subscription whose time has come at a new callback URL,
+as WebSub advises. It also asks again for subscriptions whose lease ran
+out, or whose request the hub hasn't checked within an hour. The old
+callback takes deliveries until the hub confirms the new one, and after
+that it answers 410, which ends the old subscription. A topic can move,
+though, so to follow it, discover the topic again and subscribe with a
+request of your own.
+
+To keep the map in a file or a database, write it as EDN with
+`websub/format-subscriptions`, which reveals the secrets, and read it back
+with `websub/parse-subscriptions`.
 
 Publishing
 ----------

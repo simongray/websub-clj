@@ -5,9 +5,12 @@
 
   The code follows the W3C Recommendation of 2 June 2026 at
   https://www.w3.org/TR/websub/ and cites its sections. A subscriber is a
-  server with a public URL, since the hub calls its callback. The hub
-  itself is in dk.simongray.websub.hub."
-  (:require [clojure.string :as str]
+  server with a public URL, since the hub calls its callback. It can keep
+  its subscriptions as plain data in a map: asked, verified, denied and
+  expired update the map, and due says what to renew. The hub itself is
+  in dk.simongray.websub.hub."
+  (:require #?(:clj [clojure.edn :as edn] :cljs [cljs.reader :as edn])
+            [clojure.string :as str]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
             [dk.simongray.wary-fetch.headers :as headers]
@@ -50,7 +53,10 @@
     nothing
   - :max-bytes, 32 MB: the largest delivery that a callback takes
   - :max-challenge, 512: the longest challenge that a callback gives
-    back"
+    back
+  - :retry-seconds, an hour: how long due waits for the hub to check a
+    request before it sends the request again, which WebSub leaves to the
+    subscriber"
   {:url-as-topic?          false
    :body-links?            false
    :prefer-https?          true
@@ -61,7 +67,8 @@
    :unsigned-status        403
    :wrong-signature-status 200
    :max-bytes              (* 32 1024 1024)
-   :max-challenge          512})
+   :max-challenge          512
+   :retry-seconds          3600})
 
 (def ^:no-doc algorithms
   "The hash of the HMAC of each signature method."
@@ -180,6 +187,20 @@
   "The `url` with https in place of http."
   [url]
   (str/replace url #"(?i)^http:" "https:"))
+
+;; WebSub 5.1.1: decode the characters that need no percent-encoding, which
+;; RFC 3986, section 2.3, names
+(defn ^:no-doc normalized
+  "The `url` with each unreserved character that is percent-encoded
+  decoded."
+  [url]
+  (str/replace url
+               #"%([0-9A-Fa-f]{2})"
+               (fn [[escape hex]]
+                 (let [code #?(:clj  (Long/parseLong hex 16)
+                               :cljs (js/parseInt hex 16))
+                       c    (str (char code))]
+                   (if (re-matches #"[A-Za-z0-9._~-]" c) c escape)))))
 
 (defn ^:no-doc secret?
   "Whether `s` is a secret that WebSub takes: a text of fewer than 200
@@ -563,6 +584,9 @@
   - the :signature-methods, :unsigned-status, :wrong-signature-status,
     :max-bytes and :max-challenge of default-options
 
+  For subscriptions kept in a map with asked, handler-options gives
+  :wanted-pred, :subscribed-pred and :secret.
+
   A hub calls the callback in three ways:
 
   - It checks that the subscriber asked for the :mode, :subscribe or
@@ -611,6 +635,297 @@
    (next-renewal lease-seconds at (min (quot lease-seconds 10) 86400)))
   ([lease-seconds at seconds-before]
    (later at (- lease-seconds seconds-before))))
+
+(def ^:no-doc subscription-keys
+  "The keys of a subscription that come from its request."
+  [:hub :topic :callback :secret :lease-seconds])
+
+(defn- pending
+  "The :pending of a subscription for the `request` that request made,
+  sent at the instant `at`."
+  [request at]
+  (let [fields (url/query-params (secret/reveal (:body request)))
+        lease  (some-> (get fields "hub.lease_seconds") parse-long)
+        secret (get fields "hub.secret")]
+    (cond-> {:mode     (keyword (get fields "hub.mode"))
+             :hub      (or (::http-url request) (:url request))
+             :topic    (get fields "hub.topic")
+             :callback (get fields "hub.callback")
+             :asked-at at}
+      lease  (assoc :lease-seconds lease)
+      secret (assoc :secret (secret/hide secret)))))
+
+(defn- same-url?
+  "Whether the URLs `a` and `b` are the same once normalized, as a hub
+  normalizes them."
+  [a b]
+  (and (string? a)
+       (string? b)
+       (= (normalized a) (normalized b))))
+
+;; WebSub 5.1.1: the hub adds its parameters after the query of the
+;; callback, and delivers to the callback as it is
+(defn ^:no-doc callback-pred
+  "A predicate that says whether the Ring `request` came to a callback URL:
+  to its path, with the callback's query first."
+  [{:keys [uri query-string] :as request}]
+  (let [path  (some-> uri normalized)
+        pairs (delay (url/query-pairs query-string))]
+    (fn [callback]
+      (boolean
+       (and path
+            (string? callback)
+            ;; rules out most callbacks before they're parsed
+            (or (str/includes? callback path)
+                (str/includes? callback "%"))
+            (let [{own-path :path query :query} (url/parts callback)
+                  own                           (url/query-pairs query)]
+              (and (= path (normalized (if (= "" own-path) "/" own-path)))
+                   (= own (take (count own) @pairs)))))))))
+
+(defn- matches?
+  "Whether `fields`, those of a subscription or of a pending request, are
+  for `topic` at a callback that `came?` says yes to."
+  [fields topic came?]
+  (and (came? (:callback fields))
+       (same-url? topic (:topic fields))))
+
+(defn- asking?
+  "Whether the `pending` request asks for the `mode` of `topic` at a
+  callback that `came?` says yes to."
+  [pending mode topic came?]
+  (and (= mode (:mode pending))
+       (matches? pending topic came?)))
+
+;; WebSub 5: a hub can check an active subscription again
+(defn- rechecked?
+  "Whether a check of `mode` for `topic`, at a callback that `came?` says
+  yes to, checks the active `subscription` again. While the subscriber
+  unsubscribes, it doesn't."
+  [subscription mode topic came?]
+  (and (= :active (:state subscription))
+       (= :subscribe mode)
+       (not= :unsubscribe (:mode (:pending subscription)))
+       (matches? subscription topic came?)))
+
+(defn- lapsed?
+  "Whether the instant `x` has come by the instant `at`."
+  [x at]
+  (boolean (and x (<= (inst-ms x) (inst-ms at)))))
+
+(defn- entry-at
+  "The id and the subscription in `subscriptions` whose callback, or that
+  of its pending request, `came?` says yes to, as a map entry, or nil."
+  [subscriptions came?]
+  (some (fn [[_ {:keys [callback pending]} :as entry]]
+          (when (or (came? callback) (came? (:callback pending)))
+            entry))
+        subscriptions))
+
+(defn subscription-of
+  "The id and the subscription in `subscriptions` that the Ring `request`
+  came to, as a map entry, or nil.
+
+  It's the one whose callback is the request's, or whose pending request
+  has that callback. In :deliver!, it says which subscription a delivery
+  is for."
+  [subscriptions request]
+  (entry-at subscriptions (callback-pred request)))
+
+;; WebSub 5.1: a request changes nothing until the hub verifies it
+(defn asked
+  "The `subscriptions` with the `request` for `id`, which you send at the
+  instant `at`, pending until the hub checks it.
+
+  The request is one that request makes, to subscribe or to unsubscribe.
+  Give it here before call! sends it, since a hub can check it before the
+  call returns. Meanwhile, the subscription keeps its state and callback,
+  so that a renewal at a new callback misses no delivery at the old one. A
+  new id starts as :asked."
+  [subscriptions id request at]
+  (let [ask (pending request at)]
+    (update subscriptions id
+            (fn [subscription]
+              (-> (or subscription
+                      (assoc (select-keys ask subscription-keys)
+                             :state :asked))
+                  (assoc :pending ask))))))
+
+(defn- leased
+  "The `subscription` active from the instant `at` for `lease-seconds`, or
+  with no end when that's nil."
+  [subscription lease-seconds at]
+  (cond-> (-> subscription
+              (assoc :state :active :verified-at at)
+              (dissoc :lease-seconds :expires :renew-at :ended-at :reason))
+    lease-seconds (assoc :lease-seconds lease-seconds
+                         :expires       (later at lease-seconds)
+                         :renew-at      (next-renewal lease-seconds at))))
+
+;; WebSub 5.1 and 5.3.1
+(defn verified
+  "The `subscriptions` once the handler has confirmed the hub's `check` at
+  the instant `at`, the map that :verified! gets.
+
+  It finds the subscription by the callback of its pending request. A
+  subscription becomes :active, with the hub's lease, the time that it
+  :expires and the :renew-at of next-renewal. It takes the hub, topic,
+  callback and secret of the request. An unsubscription becomes :ended. A
+  hub's own check of an active subscription at its callback renews the
+  lease."
+  [subscriptions {:keys [mode topic lease-seconds request] :as check} at]
+  (let [came? (callback-pred request)]
+    (if-let [[id {:keys [pending] :as subscription}]
+             (entry-at subscriptions came?)]
+      (assoc subscriptions id
+             (cond
+               (not (asking? pending mode topic came?))
+               (cond-> subscription
+                 (rechecked? subscription mode topic came?)
+                 (leased (or lease-seconds (:lease-seconds subscription))
+                         at))
+
+               (= :subscribe mode)
+               (-> (apply dissoc subscription :pending subscription-keys)
+                   (merge (select-keys pending subscription-keys))
+                   (leased (or lease-seconds (:lease-seconds pending)) at))
+
+               :else
+               (-> (dissoc subscription :pending :renew-at)
+                   (assoc :state :ended :ended-at at))))
+      subscriptions)))
+
+;; WebSub 5.2: a hub can deny a subscription at any time
+(defn denied
+  "The `subscriptions` after the hub denied one at the instant `at`, as the
+  `facts` that :denied! gets say. The subscription becomes :denied, with
+  the hub's :reason and nothing pending.
+
+  It finds the subscription by its callback and topic, or those of its
+  pending request. WebSub says that a subscriber should take a denied
+  subscription as one it can't have, so due doesn't ask for it again."
+  [subscriptions {:keys [topic reason request] :as facts} at]
+  (let [came?                                   (callback-pred request)
+        [id {:keys [pending] :as subscription}] (entry-at subscriptions came?)]
+    (if (or (matches? subscription topic came?)
+            (matches? pending topic came?))
+      (assoc subscriptions id
+             (cond-> (-> (dissoc subscription :pending :reason :renew-at)
+                         (assoc :state :denied :ended-at at))
+               reason (assoc :reason reason)))
+      subscriptions)))
+
+;; WebSub 5.3.1: a hub ends a subscription with its lease
+(defn expired
+  "The `subscriptions` with each active one whose lease ran out by the
+  instant `at` marked :expired, with the end of the lease as its
+  :ended-at."
+  [subscriptions at]
+  (update-vals subscriptions
+               (fn [{:keys [state expires] :as subscription}]
+                 (if (and (= :active state) (lapsed? expires at))
+                   (assoc subscription :state :expired :ended-at expires)
+                   subscription))))
+
+(defn- again
+  "The request of `mode` at the `callback`, with the `secret` and `opts`,
+  for the hub, topic and lease in `fields`."
+  [mode {:keys [hub topic lease-seconds] :as fields} callback secret opts]
+  (request mode hub topic callback (assoc opts
+                                          :lease-seconds lease-seconds
+                                          :secret        secret)))
+
+;; WebSub 5.1, 5.1.1 and 5.3.1
+(defn due
+  "The requests that the `subscriptions` need at the instant `at`, by id,
+  with the callbacks that `callback-fn` gives and `opts`:
+
+  - a renewal of each active subscription whose :renew-at has come
+  - a new request for each whose lease ran out
+  - a pending request again when the hub hasn't checked it within
+    :retry-seconds, at a new callback if it subscribes
+
+  The `callback-fn` is a function of an id and its subscription that gives
+  a new callback URL, since WebSub 5.1.1 asks for one with each renewal.
+  Give each request to asked before call! sends it. The `opts` are those
+  of request, and these:
+
+  - :secret-fn, a function of an id and its subscription that gives the
+    secret of a renewal, by default the one that the subscription has
+  - :retry-seconds, as default-options has it"
+  ([subscriptions at callback-fn]
+   (due subscriptions at callback-fn {}))
+  ([subscriptions at callback-fn opts]
+   {:pre [(map? opts)]}
+   (let [{:keys [retry-seconds secret-fn]}
+         (merge default-options {:secret-fn (fn [_ s] (:secret s))} opts)]
+     (into {}
+           (keep (fn [[id {:keys [state pending renew-at] :as s}]]
+                   (cond
+                     pending
+                     (when (lapsed? (some-> (:asked-at pending)
+                                            (later retry-seconds))
+                                    at)
+                       [id (if (= :subscribe (:mode pending))
+                             (again :subscribe pending (callback-fn id s)
+                                    (:secret pending) opts)
+                             (again :unsubscribe pending (:callback pending)
+                                    nil opts))])
+
+                     (or (= :expired state)
+                         (and (= :active state) (lapsed? renew-at at)))
+                     [id (again :subscribe s (callback-fn id s)
+                                (secret-fn id s) opts)])))
+           subscriptions))))
+
+(defn handler-options
+  "The :wanted-pred, :subscribed-pred and :secret of handler for the
+  subscriptions that `subscriptions-fn` gives, a function of no arguments,
+  e.g. one that derefs an atom.
+
+  The handler then confirms the pending request of a subscription, and a
+  hub's own check of an active one at its callback. It takes a delivery
+  at the callback of an active subscription, signed with that
+  subscription's secret. At any other callback it answers 410, so that a
+  hub ends a subscription that a renewal replaced. Add your own :deliver!,
+  :verified! and :denied!, where the last two update the subscriptions
+  with verified and denied."
+  [subscriptions-fn]
+  (let [delivering (fn [request]
+                     (let [came? (callback-pred request)]
+                       (some #(when (and (= :active (:state %))
+                                         (came? (:callback %)))
+                                %)
+                             (vals (subscriptions-fn)))))]
+    {:wanted-pred     (fn [{:keys [mode topic request]}]
+                        (let [came? (callback-pred request)]
+                          (boolean
+                           (some #(or (asking? (:pending %) mode topic came?)
+                                      (rechecked? % mode topic came?))
+                                 (vals (subscriptions-fn))))))
+     :subscribed-pred (comp some? delivering)
+     :secret          (comp :secret delivering)}))
+
+(defn- with-secrets
+  "The `subscription` with `f` applied to each of its secrets."
+  [f subscription]
+  (cond-> subscription
+    (:secret subscription)            (update :secret f)
+    (:secret (:pending subscription)) (update-in [:pending :secret] f)))
+
+;; A hidden secret prints as #<secret>, which EDN can't read
+(defn format-subscriptions
+  "The `subscriptions` as EDN, e.g. for a file or a database, with their
+  secrets revealed. Keep the text as safe as the secrets."
+  [subscriptions]
+  (binding [*print-length* nil
+            *print-level*  nil]
+    (pr-str (update-vals subscriptions #(with-secrets secret/reveal %)))))
+
+(defn parse-subscriptions
+  "The subscriptions in the EDN `s` that format-subscriptions gives."
+  [s]
+  (update-vals (edn/read-string s) #(with-secrets secret/hide %)))
 
 (comment
   ;; the hubs of a feed, from its headers first
@@ -666,4 +981,39 @@
   (serve {:request-method :post :headers {} :body feed})
 
   (next-renewal 864000 #inst "2026-10-10T12:00:00Z")
+
+  ;; the subscriptions of a subscriber, by an id of its own
+  (def subscriptions
+    (atom {}))
+
+  (def subscribe
+    (request :subscribe "https://hub.example.org/"
+             "https://example.org/feed.xml" callback {:secret (token)}))
+
+  (swap! subscriptions asked "feed-1" subscribe #inst "2026-10-10T12:00Z")
+
+  (def serve-subscriptions
+    (handler (merge (handler-options #(deref subscriptions))
+                    {:deliver!  #(prn (key (subscription-of @subscriptions
+                                                            (:request %))))
+                     :verified! #(swap! subscriptions verified %
+                                        #inst "2026-10-10T12:00:05Z")
+                     :denied!   #(swap! subscriptions denied %
+                                        #inst "2026-10-10T12:00:05Z")})))
+
+  ;; the hub checks the subscription at its callback
+  (serve-subscriptions
+   {:request-method :get
+    :uri            (:path (url/parts callback))
+    :query-string   (url/query-string
+                     {"hub.mode"          "subscribe"
+                      "hub.topic"         "https://example.org/feed.xml"
+                      "hub.challenge"     "abc123"
+                      "hub.lease_seconds" 864000})})
+
+  ;; its renewal, nine days later
+  (due @subscriptions #inst "2026-10-19T12:00:05Z"
+       (fn [_ _] (str "https://app.example.net/websub/" (token))))
+
+  (format-subscriptions @subscriptions)
   #_.)

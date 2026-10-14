@@ -432,3 +432,201 @@
     (is (every? #(re-matches #"[A-Za-z0-9_-]{43}" %) tokens) "in the letters of a challenge too")
     (is (= 10 (count (set tokens)))))
   (is (re-matches #"[A-Za-z0-9_-]{22}" (websub/token 16)) "of 16 bytes"))
+
+(def feed-bytes
+  (bytes/encode "<rss version=\"2.0\"><channel/></rss>"))
+
+(defn- to
+  "A Ring request of `method` to the callback `url`, with the `params` of a
+  hub after the callback's own."
+  [method url params]
+  (let [{:keys [path query]} (url/parts url)]
+    {:request-method method
+     :uri            path
+     :query-string   (->> [query (url/query-string params)]
+                          (remove str/blank?)
+                          (str/join "&"))}))
+
+(defn- fields
+  "The form of the subscription `request`."
+  [request]
+  (url/query-params (:body (http/revealed request))))
+
+(deftest subscriptions-at-the-callback
+  (let [subs   (atom {})
+        clock  (atom #inst "2026-10-10T12:00:00Z")
+        came   (atom [])
+        serve  (websub/handler
+                (merge (websub/handler-options #(deref subs))
+                       {:deliver!  (fn [{:keys [request]}]
+                                     (swap! came conj
+                                            (key (websub/subscription-of
+                                                  @subs request))))
+                        :verified! #(swap! subs websub/verified % @clock)
+                        :denied!   #(swap! subs websub/denied % @clock)}))
+        check! (fn [mode url & [params]]
+                 (:status (serve (to :get url (merge {"hub.mode"      mode
+                                                      "hub.topic"     topic
+                                                      "hub.challenge" "c"}
+                                                     params)))))
+        post!  (fn [url secret]
+                 (let [signature (websub/signature "sha256" secret feed-bytes)]
+                   (:status (serve (assoc (to :post url {})
+                                          :headers {"x-hub-signature" signature}
+                                          :body feed-bytes)))))
+        ask!   (fn [id request]
+                 (swap! subs websub/asked id request @clock))
+        state  #(select-keys (get @subs "feed-1") %)
+        one    "https://app.example.net/websub/one?feed=1"
+        two    "https://app.example.net/websub/two"]
+    (testing "a subscription that the hub checks"
+      (ask! "feed-1" (websub/request :subscribe hub topic one
+                                     {:secret        shared-secret
+                                      :lease-seconds 864000}))
+      (is (= {:state :asked :callback one} (state [:state :callback])))
+      (is (= 404 (check! "subscribe" one {"hub.topic" (str topic "?x")}))
+          "205: a topic that the subscriber didn't ask for")
+      (is (= 404 (check! "subscribe" "https://app.example.net/websub/one"))
+          "a callback without its own query")
+      (is (= 404 (check! "unsubscribe" one)) "a mode that it didn't ask for")
+      (is (= 410 (post! one shared-secret)) "a delivery before the check")
+      (is (= 200 (check! "subscribe" one {"hub.lease_seconds" 864000})))
+      (is (= {:state         :active
+              :lease-seconds 864000
+              :verified-at   #inst "2026-10-10T12:00:00Z"
+              :expires       #inst "2026-10-20T12:00:00Z"
+              :renew-at      #inst "2026-10-19T12:00:00Z"}
+             (state [:state :lease-seconds :verified-at :expires :renew-at
+                     :pending]))))
+    (testing "deliveries"
+      (is (= 200 (post! one shared-secret)))
+      (is (= ["feed-1"] @came) "of the subscription at that callback")
+      (is (= 410 (post! two shared-secret)) "and at no other"))
+    (testing "a renewal at a new callback"
+      (is (= {} (websub/due @subs @clock (constantly two))))
+      (reset! clock #inst "2026-10-19T12:00:00Z")
+      (ask! "feed-1" (get (websub/due @subs @clock (constantly two)) "feed-1"))
+      (is (= 200 (post! one shared-secret))
+          "the old callback takes deliveries until the hub checks the new")
+      (is (= 200 (check! "subscribe" two {"hub.lease_seconds" 864000})))
+      (is (= {:state :active :callback two :renew-at #inst "2026-10-28T12:00Z"}
+             (state [:state :callback :renew-at])))
+      (is (= 410 (post! one shared-secret)) "and then a hub ends the old one")
+      (is (= 200 (post! two shared-secret))))
+    (testing "a hub's own check of an active subscription"
+      (reset! clock #inst "2026-10-20T12:00:00Z")
+      (is (= 200 (check! "subscribe" two {"hub.lease_seconds" 3600})))
+      (is (= {:lease-seconds 3600 :expires #inst "2026-10-20T13:00:00Z"}
+             (state [:lease-seconds :expires]))))
+    (testing "an unsubscription"
+      (ask! "feed-1" (websub/request :unsubscribe hub topic two))
+      (is (= 404 (check! "subscribe" two)) "while the subscriber leaves")
+      (is (= 200 (post! two shared-secret)) "a delivery before the check")
+      (is (= 200 (check! "unsubscribe" two)))
+      (is (= {:state :ended :ended-at #inst "2026-10-20T12:00:00Z"}
+             (state [:state :ended-at :pending :renew-at])))
+      (is (= 410 (post! two shared-secret)))
+      (is (= 404 (check! "subscribe" two)))
+      (is (= {} (websub/due @subs #inst "2027-01-01T00:00Z" (constantly one)))
+          "and it's due no more"))
+    (testing "a denial"
+      (ask! "feed-2" (websub/request :subscribe hub topic one))
+      (is (= 200 (check! "denied" one {"hub.topic" (str topic "?x")})))
+      (is (= :asked (get-in @subs ["feed-2" :state])) "of another topic")
+      (is (= 200 (check! "denied" one {"hub.reason" "The feed is private."})))
+      (is (= {:state :denied :reason "The feed is private."}
+             (select-keys (get @subs "feed-2") [:state :reason :pending])))
+      (is (= {} (websub/due @subs #inst "2027-01-01T00:00Z" (constantly one)))
+          "which is due no more either"))))
+
+(defn- subscribed
+  "The `subscriptions` with `id` subscribed at the callback `url`, checked
+  at the instant `at` for a lease of `lease` seconds."
+  [subscriptions id url at lease]
+  (-> subscriptions
+      (websub/asked id (websub/request :subscribe hub topic url
+                                       {:secret shared-secret})
+                    at)
+      (websub/verified {:mode          :subscribe
+                        :topic         topic
+                        :lease-seconds lease
+                        :request       (to :get url {})}
+                       at)))
+
+(deftest subscriptions-that-are-due
+  (let [t0    #inst "2026-10-10T12:00:00Z"
+        renew #inst "2026-10-19T12:00:00Z"
+        subs  (subscribed {} :a callback t0 864000)
+        fresh (fn [id _]
+                (str "https://app.example.net/websub/" (name id) "-2"))]
+    (testing "a renewal"
+      (is (= {} (websub/due subs #inst "2026-10-19T11:59:59Z" fresh)))
+      (is (= {"hub.mode"          "subscribe"
+              "hub.topic"         topic
+              "hub.callback"      "https://app.example.net/websub/a-2"
+              "hub.lease_seconds" "864000"
+              "hub.secret"        shared-secret}
+             (fields (:a (websub/due subs renew fresh))))
+          "at a new callback, with the same lease and secret")
+      (is (= "another"
+             (get (fields (:a (websub/due subs renew fresh
+                                          {:secret-fn (constantly "another")})))
+                  "hub.secret"))
+          "or a new secret")
+      (is (= "k" (get (fields (:a (websub/due subs renew fresh
+                                              {:params [["key" "k"]]})))
+                      "key"))
+          "with the options of request"))
+    (testing "a lease that ran out"
+      (is (= subs (websub/expired subs #inst "2026-10-20T11:59:59Z")))
+      (let [gone (websub/expired subs #inst "2026-10-20T12:00:00Z")]
+        (is (= [:expired #inst "2026-10-20T12:00:00Z"]
+               ((juxt :state :ended-at) (:a gone))))
+        (is (= [:a] (keys (websub/due gone #inst "2026-10-30T00:00Z" fresh)))
+            "is asked for again")))
+    (testing "a request that the hub doesn't check"
+      (let [asked (websub/asked subs :a (:a (websub/due subs renew fresh))
+                                renew)
+            again #(get (fields (:a %)) "hub.callback")]
+        (is (= {} (websub/due asked #inst "2026-10-19T12:59:59Z" fresh)))
+        (is (= "https://app.example.net/websub/a-3"
+               (again (websub/due asked #inst "2026-10-19T13:00:00Z"
+                                  (constantly
+                                   "https://app.example.net/websub/a-3"))))
+            "is sent again after an hour, at a new callback")
+        (is (= [:a] (keys (websub/due asked #inst "2026-10-19T12:01:00Z" fresh
+                                      {:retry-seconds 60})))))
+      (let [leave   (websub/request :unsubscribe hub topic callback)
+            leaving (websub/asked subs :a leave t0)]
+        (is (= (fields leave)
+               (fields (:a (websub/due leaving #inst "2026-10-10T13:00Z"
+                                       fresh))))
+            "an unsubscription at the same callback")))
+    (testing "the subscription of a request"
+      (is (= [:a (:a subs)]
+             (websub/subscription-of subs (to :post callback {}))))
+      (is (nil? (websub/subscription-of subs (to :post (str callback "x") {}))))
+      (is (= "http://hub.example.org/"
+             (:hub (:c (websub/asked {} :c (websub/request
+                                            :subscribe "http://hub.example.org/"
+                                            topic callback
+                                            {:secret shared-secret})
+                                     t0))))
+          "the http URL of a hub that a secret goes to over https")
+      (let [odd (websub/asked {} :d (websub/request
+                                     :subscribe hub topic
+                                     "https://app.example.net/websub/%7Ed")
+                              t0)]
+        (is (= :active (:state (:d (websub/verified
+                                    odd
+                                    {:mode    :subscribe
+                                     :topic   topic
+                                     :request {:uri "/websub/~d"}}
+                                    t0))))
+            "WebSub 5.1.1: at a callback whose letters the hub decodes")))
+    (testing "as EDN"
+      (let [both (websub/asked subs :a (:a (websub/due subs renew fresh)) renew)
+            text (websub/format-subscriptions both)]
+        (is (not (str/includes? (pr-str both) shared-secret)))
+        (is (str/includes? text shared-secret) "with the secrets revealed")
+        (is (= both (websub/parse-subscriptions text)))))))

@@ -12,7 +12,6 @@
   The code follows sections 5 to 8 of the W3C Recommendation of 2 June
   2026, https://www.w3.org/TR/websub/."
   (:require #?(:clj [clojure.edn :as edn] :cljs [cljs.reader :as edn])
-            [clojure.string :as str]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
             [dk.simongray.wary-fetch.headers :as headers]
@@ -23,20 +22,6 @@
             [dk.simongray.websub.document :as document]
             [dk.simongray.websub.ring :as ring]
             [dk.simongray.whatwg-mime :as mime]))
-
-;; WebSub 5.1.1: decode the characters that need no percent-encoding, which
-;; RFC 3986, section 2.3, names
-(defn ^:no-doc normalized
-  "The `url` with each unreserved character that is percent-encoded
-  decoded."
-  [url]
-  (str/replace url
-               #"%([0-9A-Fa-f]{2})"
-               (fn [[escape hex]]
-                 (let [code #?(:clj  (Long/parseLong hex 16)
-                               :cljs (js/parseInt hex 16))
-                       c    (str (char code))]
-                   (if (re-matches #"[A-Za-z0-9._~-]" c) c escape)))))
 
 ;; WebSub 5.3.1
 (defn verified?
@@ -96,7 +81,7 @@
    :diff?              false
    :accept-pred        (constantly true)
    :secret-pred        websub/secret?
-   :url-fn             normalized
+   :url-fn             websub/normalized
    :topic-fields       ["hub.url" "hub.topic"]
    :challenge-fn       websub/token
    :verified-pred      verified?

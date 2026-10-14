@@ -116,3 +116,52 @@
             (is (= [true true] (map :verified? (run-jobs! jobs @hub-opts))))
             (is (= [] (:deliveries (first (publish!)))))
             (is (= [] @came))))))))
+
+(deftest a-renewal-at-a-new-callback
+  (let [base     (atom nil)
+        jobs     (atom [])
+        subs     (atom {})
+        came     (atom [])
+        hub-opts (delay (merge anywhere
+                               {:url       (str @base "/hub")
+                                :store     (hub/memory-store)
+                                :schedule! #(swap! jobs conj %)}))
+        now      #(java.util.Date.)
+        callback (websub/handler
+                  (merge (websub/handler-options #(deref subs))
+                         {:deliver!  #(swap! came conj (:uri (:request %)))
+                          :verified! #(swap! subs websub/verified % (now))
+                          :denied!   #(swap! subs websub/denied % (now))}))]
+    (with-server {"/feed" (feed base)
+                  "/hub"  (fn [request] ((hub/handler @hub-opts) request))
+                  "/one"  callback
+                  "/two"  callback}
+      (fn [url]
+        (reset! base url)
+        (let [topic    (str url "/feed")
+              ask!     (fn [request]
+                         (swap! subs websub/asked :feed request (now))
+                         (websub/call! request anywhere)
+                         (run-jobs! jobs @hub-opts))
+              outcomes (fn []
+                         (websub/publish! [(str url "/hub")] topic anywhere)
+                         (->> (run-jobs! jobs @hub-opts)
+                              first
+                              :deliveries
+                              (map (juxt :outcome :status))
+                              set))]
+          (testing "a subscription"
+            (ask! (websub/request :subscribe (str url "/hub") topic
+                                  (str url "/one")))
+            (is (= :active (get-in @subs [:feed :state]))))
+          (testing "its renewal, which the hub checks at the new callback"
+            (ask! (:feed (websub/due @subs (websub/later (now) 864000)
+                                     (constantly (str url "/two")))))
+            (is (= [:active (str url "/two")]
+                   ((juxt :state :callback) (:feed @subs)))))
+          (testing "deliveries"
+            (is (= #{[:delivered 200] [:gone 410]} (outcomes))
+                "the old callback is gone")
+            (is (= ["/two"] @came))
+            (is (= #{[:delivered 200]} (outcomes))
+                "and the hub ended its subscription")))))))
