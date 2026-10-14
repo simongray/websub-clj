@@ -34,29 +34,22 @@ needs a callback URL that the hub can reach.
 Getting started
 ---------------
 
-It requires Clojure 1.11+ and Java 11+. For the latest release, add it
-from [Clojars](https://clojars.org/dk.simongray/websub-clj) to the
-`:deps` in your `deps.edn`:
+It requires Clojure 1.11+ and Java 11+. Add it from
+[Clojars](https://clojars.org/dk.simongray/websub-clj) to the `:deps` in
+your `deps.edn`:
 
 ```clojure
 dk.simongray/websub-clj {:mvn/version "0.6.0"}
 ```
 
-For changes that aren't released yet, use the SHA of the latest commit on
-`master` instead:
+For unreleased changes, depend on the latest commit on `master` instead.
+In shadow-cljs, a Git dependency only works through `deps.edn`, so set
+`:deps true` in your `shadow-cljs.edn` too. To read feeds in Node, set
+`globalThis.DOMParser` to a DOMParser, e.g. the one from
+`@xmldom/xmldom`.
 
-```clojure
-dk.simongray/websub-clj
-{:git/url "https://github.com/simongray/websub-clj"
- :git/sha "…"}
-```
-
-For ClojureScript, shadow-cljs only reads Git dependencies from
-`deps.edn`, so also set `:deps true` in your `shadow-cljs.edn`. To read
-feeds in Node, set `globalThis.DOMParser` to a DOMParser, e.g. the one
-from `@xmldom/xmldom`.
-
-### Subscribe
+Subscribing
+-----------
 
 Find the hubs of a topic with `discover!`:
 
@@ -125,7 +118,8 @@ there, and before it ends, at the time that `websub/next-renewal` gives,
 subscribe again with a new callback URL. Discover the topic first, since
 it may have moved.
 
-### Publish
+Publishing
+----------
 
 Name the hub in a Link header of the topic, or in the feed or page itself
 with the links of `websub/links`, and tell the hub each time the topic
@@ -141,7 +135,8 @@ changes:
 ;; => [{:hub "https://pubsubhubbub.superfeedr.com/" :status 204}]
 ```
 
-### Run a hub
+Running a hub
+-------------
 
 A hub consists of its Ring handler, a store of subscriptions and a
 function of yours that runs its jobs, e.g. on a thread pool or from a
@@ -234,16 +229,6 @@ Principles
   [whatwg-url](https://github.com/simongray/whatwg-url) for their URLs and
   [whatwg-mime](https://github.com/simongray/whatwg-mime) to tell a feed
   from a page.
-
-Versions
---------
-
-Until 1.0, a release that changes the API gets a new minor version, e.g.
-from 0.4.2 to 0.5.0, and one that only fixes gets a new patch version,
-e.g. from 0.4.2 to 0.4.3. A function that's renamed or removed goes
-without a deprecated alias, and the commit of each release says what
-changed. The tests run in CI on Java 11 and 25, in Node and in a
-headless Chrome.
 
 Development
 -----------
