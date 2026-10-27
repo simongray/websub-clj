@@ -39,7 +39,7 @@ It requires Clojure 1.11+ and Java 11+. Add it from
 your `deps.edn`:
 
 ```clojure
-dk.simongray/websub-clj {:mvn/version "0.7.0"}
+dk.simongray/websub-clj {:mvn/version "0.7.1"}
 ```
 
 For unreleased changes, depend on the latest commit on `master` instead.
