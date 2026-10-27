@@ -6,12 +6,12 @@
  ;; feed, html-pieces reads the links of a page, and whatwg-url resolves the
  ;; URLs of both. whatwg-mime tells a feed from a page.
  :deps  {org.clojure/clojure        {:mvn/version "1.11.4"}
-         dk.simongray/wary-fetch    {:mvn/version "0.14.1"}
-         dk.simongray/webcrypto-clj {:mvn/version "0.1.2"}
-         dk.simongray/qname-hiccup  {:mvn/version "0.6.0"}
-         dk.simongray/html-pieces   {:mvn/version "0.7.0"}
+         dk.simongray/wary-fetch    {:mvn/version "0.16.1"}
+         dk.simongray/webcrypto-clj {:mvn/version "0.1.3"}
+         dk.simongray/qname-hiccup  {:mvn/version "0.6.1"}
+         dk.simongray/html-pieces   {:mvn/version "0.8.0"}
          dk.simongray/whatwg-url    {:mvn/version "0.1.0"}
-         dk.simongray/whatwg-mime   {:mvn/version "0.2.1"}}
+         dk.simongray/whatwg-mime   {:mvn/version "0.2.2"}}
 
  :aliases
  {;; clojure -X:test
@@ -23,8 +23,8 @@
 
   ;; clojure -M:cljs compile test  (the tests in Node)
   :cljs {:extra-paths   ["test"]
-         :override-deps {org.clojure/clojure {:mvn/version "1.12.5"}}
-         :extra-deps    {thheller/shadow-cljs {:mvn/version "3.5.3"}}
+         :override-deps {org.clojure/clojure {:mvn/version "1.12.6"}}
+         :extra-deps    {thheller/shadow-cljs {:mvn/version "3.5.8"}}
          :main-opts     ["-m" "shadow.cljs.devtools.cli"]}
 
   ;; clojure -T:build jar | install | deploy  (see build.clj)
